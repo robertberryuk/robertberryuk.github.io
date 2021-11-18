@@ -1,1 +1,0 @@
-var json_FrancisCloseHall_7 = {"type":"FeatureCollection","name":"FrancisCloseHall_7","crs":{"type":"name","properties":{"name":"urn:ogc:def:crs:OGC:1.3:CRS84"}},"features":[{"type":"Feature","properties":{"id":null},"geometry":{"type":"Point","coordinates":[-2.078784599689497,51.906904717892097]}}]}
