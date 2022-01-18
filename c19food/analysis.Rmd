@@ -1,0 +1,129 @@
+---
+title: "Covid-19 Food Systems Database Analysis"
+author: "Robert Berry"
+date: "18/01/2022"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+    smooth_scroll: yes
+    theme: united
+    code_folding: hide
+    highlight: tango
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE)
+```
+
+The aim of this website is to report the ongoing analysis of the CCRI's [COVID-19 and Food Systems Database](http://www.ccri.ac.uk/covid19-food-db/). The current analysis is based on a version of the database downloaded on **14/01/2021**.  records
+<!-- ```{r setup, include=FALSE} -->
+<!-- knitr::opts_chunk$set(echo = TRUE) -->
+
+<!-- ``` -->
+
+## 1. Data import and cleaning
+
+Load data and prepare for analysis:
+
+ - Trim white space on import <br />
+ - Rename columns <br />
+ - Reformat date column (convert from DD/MM/YY to  YY/MM/DD) <br />
+ - Remove empty records <br />
+ - Remove duplicate records <br />
+ - Sort by date (descending) <br />
+ - Add unique ID column
+ 
+```{r echo=TRUE, eval=TRUE}
+#> 1.1 Load libraries 
+library(tidyverse)
+library(dplyr)
+library(here)
+library(lubridate) # for date string manipulation/conversion
+library(janitor)
+library(knitr)
+library(ggplot2)
+  
+#> 1.2 Import data (trimming white space in the process)
+db <- read_csv(here("In", "C19_Food_DB_220114.csv"), trim_ws = TRUE)
+```
+
+
+Original database ("db") on import - **`r toString(nrow(db))`** records
+```{r echo=FALSE, eval=TRUE, message=FALSE, warning=FALSE}
+#> Glimpse
+glimpse(db)
+```
+
+```{r echo=TRUE, eval=TRUE}
+#> 1.3 Prep for analysis (clean, tidy, transform)
+#> Rename columns
+db <- db |> 
+  rename(AUTH_SOURCE = `Author(s) / Source`, TYPE = `Article Type`, THEME_MAIN=`Theme(s)`, THEME_SUB = `Sub-Theme(s)`) 
+for( i in colnames(db)){
+    colnames(db)[which(colnames(db)==i)] = toupper(i)
+ }
+# Convert date format to YYYY/MM/DD for analysis and sorting by date 
+db$DATE <- as.Date(lubridate::parse_date_time(db$DATE, c('dmy', 'ymd')))
+
+#> Remove empty records where all columns are "NA"
+# Following filters rows with at least one column not "NA"
+db <- janitor::remove_empty(db, which = "rows")
+
+#> Remove duplicates
+db <- db |> distinct()
+
+# Add unique ID column
+# First sort by date (oldest first)
+db <- db |> 
+  arrange(DATE)
+# Add ID col
+db$UID <- seq.int(nrow(db))
+# Bring new UID column to front
+db <- db |> select(UID, everything())
+
+#> replace ampersand string "&amp;" with "&" in selected columns
+db$THEME_MAIN <- (gsub("&amp;", "&", db$THEME_MAIN))
+db$THEME_SUB <- (gsub("&amp;", "&", db$THEME_SUB))
+
+```
+Processed database ("db") after cleaning and pre-processing - **`r toString(nrow(db))`** records
+```{r echo=FALSE, eval=TRUE, message=FALSE, warning=FALSE}
+#> Glimpse
+glimpse(db)
+
+```
+<br />
+
+## 2. EDA - Themes
+
+This section focuses on an exploratory analysis of the "THEMES" and "SUB-THEMES" columns.
+
+### 2.1 Total counts
+
+```{r echo=TRUE, eval=TRUE}
+t.main.sum <- db |> 
+  select(THEME_MAIN) |> 
+  group_by(THEME_MAIN) |> 
+  summarise(Count = n()) |> 
+  arrange(desc(Count))
+
+knitr::kable(t.main.sum)
+
+p2.1 <- ggplot(t.main.sum, aes(x = reorder(THEME_MAIN, Count), y = Count)) +
+  theme_bw() +
+  geom_bar(stat = "identity") +
+  theme(axis.title.y = element_blank()) +
+  coord_flip() 
+p2.1
+  
+
+```
+
+export and link to exports from web page!
+need to split the cocantenate dones and re-do summary!
+
