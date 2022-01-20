@@ -1,0 +1,212 @@
+% Options for packages loaded elsewhere
+\PassOptionsToPackage{unicode}{hyperref}
+\PassOptionsToPackage{hyphens}{url}
+%
+\documentclass[
+]{article}
+\usepackage{amsmath,amssymb}
+\usepackage{lmodern}
+\usepackage{ifxetex,ifluatex}
+\ifnum 0\ifxetex 1\fi\ifluatex 1\fi=0 % if pdftex
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{textcomp} % provide euro and other symbols
+\else % if luatex or xetex
+  \usepackage{unicode-math}
+  \defaultfontfeatures{Scale=MatchLowercase}
+  \defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
+\fi
+% Use upquote if available, for straight quotes in verbatim environments
+\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
+\IfFileExists{microtype.sty}{% use microtype if available
+  \usepackage[]{microtype}
+  \UseMicrotypeSet[protrusion]{basicmath} % disable protrusion for tt fonts
+}{}
+\makeatletter
+\@ifundefined{KOMAClassName}{% if non-KOMA class
+  \IfFileExists{parskip.sty}{%
+    \usepackage{parskip}
+  }{% else
+    \setlength{\parindent}{0pt}
+    \setlength{\parskip}{6pt plus 2pt minus 1pt}}
+}{% if KOMA class
+  \KOMAoptions{parskip=half}}
+\makeatother
+\usepackage{xcolor}
+\IfFileExists{xurl.sty}{\usepackage{xurl}}{} % add URL line breaks if available
+\IfFileExists{bookmark.sty}{\usepackage{bookmark}}{\usepackage{hyperref}}
+\hypersetup{
+  pdftitle={Covid-19 Food Systems Database Analysis},
+  pdfauthor={Robert Berry},
+  hidelinks,
+  pdfcreator={LaTeX via pandoc}}
+\urlstyle{same} % disable monospaced font for URLs
+\usepackage[margin=1in]{geometry}
+\usepackage{color}
+\usepackage{fancyvrb}
+\newcommand{\VerbBar}{|}
+\newcommand{\VERB}{\Verb[commandchars=\\\{\}]}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}{commandchars=\\\{\}}
+% Add ',fontsize=\small' for more characters per line
+\usepackage{framed}
+\definecolor{shadecolor}{RGB}{248,248,248}
+\newenvironment{Shaded}{\begin{snugshade}}{\end{snugshade}}
+\newcommand{\AlertTok}[1]{\textcolor[rgb]{0.94,0.16,0.16}{#1}}
+\newcommand{\AnnotationTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\newcommand{\AttributeTok}[1]{\textcolor[rgb]{0.77,0.63,0.00}{#1}}
+\newcommand{\BaseNTok}[1]{\textcolor[rgb]{0.00,0.00,0.81}{#1}}
+\newcommand{\BuiltInTok}[1]{#1}
+\newcommand{\CharTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
+\newcommand{\CommentTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textit{#1}}}
+\newcommand{\CommentVarTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\newcommand{\ConstantTok}[1]{\textcolor[rgb]{0.00,0.00,0.00}{#1}}
+\newcommand{\ControlFlowTok}[1]{\textcolor[rgb]{0.13,0.29,0.53}{\textbf{#1}}}
+\newcommand{\DataTypeTok}[1]{\textcolor[rgb]{0.13,0.29,0.53}{#1}}
+\newcommand{\DecValTok}[1]{\textcolor[rgb]{0.00,0.00,0.81}{#1}}
+\newcommand{\DocumentationTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\newcommand{\ErrorTok}[1]{\textcolor[rgb]{0.64,0.00,0.00}{\textbf{#1}}}
+\newcommand{\ExtensionTok}[1]{#1}
+\newcommand{\FloatTok}[1]{\textcolor[rgb]{0.00,0.00,0.81}{#1}}
+\newcommand{\FunctionTok}[1]{\textcolor[rgb]{0.00,0.00,0.00}{#1}}
+\newcommand{\ImportTok}[1]{#1}
+\newcommand{\InformationTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\newcommand{\KeywordTok}[1]{\textcolor[rgb]{0.13,0.29,0.53}{\textbf{#1}}}
+\newcommand{\NormalTok}[1]{#1}
+\newcommand{\OperatorTok}[1]{\textcolor[rgb]{0.81,0.36,0.00}{\textbf{#1}}}
+\newcommand{\OtherTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{#1}}
+\newcommand{\PreprocessorTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textit{#1}}}
+\newcommand{\RegionMarkerTok}[1]{#1}
+\newcommand{\SpecialCharTok}[1]{\textcolor[rgb]{0.00,0.00,0.00}{#1}}
+\newcommand{\SpecialStringTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
+\newcommand{\StringTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
+\newcommand{\VariableTok}[1]{\textcolor[rgb]{0.00,0.00,0.00}{#1}}
+\newcommand{\VerbatimStringTok}[1]{\textcolor[rgb]{0.31,0.60,0.02}{#1}}
+\newcommand{\WarningTok}[1]{\textcolor[rgb]{0.56,0.35,0.01}{\textbf{\textit{#1}}}}
+\usepackage{graphicx}
+\makeatletter
+\def\maxwidth{\ifdim\Gin@nat@width>\linewidth\linewidth\else\Gin@nat@width\fi}
+\def\maxheight{\ifdim\Gin@nat@height>\textheight\textheight\else\Gin@nat@height\fi}
+\makeatother
+% Scale images if necessary, so that they will not overflow the page
+% margins by default, and it is still possible to overwrite the defaults
+% using explicit options in \includegraphics[width, height, ...]{}
+\setkeys{Gin}{width=\maxwidth,height=\maxheight,keepaspectratio}
+% Set default figure placement to htbp
+\makeatletter
+\def\fps@figure{htbp}
+\makeatother
+\setlength{\emergencystretch}{3em} % prevent overfull lines
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\setcounter{secnumdepth}{-\maxdimen} % remove section numbering
+\ifluatex
+  \usepackage{selnolig}  % disable illegal ligatures
+\fi
+
+\title{Covid-19 Food Systems Database Analysis}
+\author{Robert Berry}
+\date{12/01/2022}
+
+\begin{document}
+\maketitle
+
+{
+\setcounter{tocdepth}{4}
+\tableofcontents
+}
+\hypertarget{data-import-and-cleaning}{%
+\subsection{1. Data import and
+cleaning}\label{data-import-and-cleaning}}
+
+Load data and prepare for analysis: - Trim white space on import -
+Rename columns - Reformat date column (convert from DD/MM/YY to
+YY/MM/DD) - Remove empty records - Remove duplicate records - Sort by
+date (descending) - Add unique ID column
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\CommentTok{\#\textgreater{} 1.1 Load libraries }
+\FunctionTok{library}\NormalTok{(tidyverse)}
+\FunctionTok{library}\NormalTok{(dplyr)}
+\FunctionTok{library}\NormalTok{(here)}
+\FunctionTok{library}\NormalTok{(lubridate) }\CommentTok{\# for date string manipulation/conversion}
+\FunctionTok{library}\NormalTok{(janitor)}
+
+\CommentTok{\#\textgreater{} 1.2 Import data (trimming white space in the process)}
+\NormalTok{db }\OtherTok{\textless{}{-}} \FunctionTok{read\_csv}\NormalTok{(}\FunctionTok{here}\NormalTok{(}\StringTok{"In"}\NormalTok{, }\StringTok{"C19\_Food\_DB\_220114.csv"}\NormalTok{), }\AttributeTok{trim\_ws =} \ConstantTok{TRUE}\NormalTok{)}
+\end{Highlighting}
+\end{Shaded}
+
+Original database (``db'') on import
+
+\begin{verbatim}
+## Rows: 1,526
+## Columns: 9
+## $ Title                <chr> "City Region Food Systems Building Resilience to ~
+## $ `Author(s) / Source` <chr> "Urbanet", "YES! Magazine", "Manchester Evening N~
+## $ `Article Type`       <chr> "Web page", "Magazine article", "News article", "~
+## $ Date                 <chr> "27/11/2021", "12/10/2021", "01/10/2021", "12/11/~
+## $ `Theme(s)`           <chr> "Urban Food Systems", "Urban Food Systems", "Reta~
+## $ WWW                  <chr> "<a href=\"https://www.urbanet.info/city-region-f~
+## $ `Sub-Theme(s)`       <chr> "Urban Food Systems – General", "Urban Food Syste~
+## $ Summary              <chr> "the pandemic has again shown that urban food sys~
+## $ Keywords             <chr> "urban food systems, resilience", "urban food, fo~
+\end{verbatim}
+
+\begin{Shaded}
+\begin{Highlighting}[]
+\CommentTok{\#\textgreater{} 1.3 Prep for analysis (clean, tidy, transform)}
+\CommentTok{\#\textgreater{} Rename columns}
+\NormalTok{db }\OtherTok{\textless{}{-}}\NormalTok{ db }\SpecialCharTok{|}\ErrorTok{\textgreater{}} 
+  \FunctionTok{rename}\NormalTok{(}\AttributeTok{AUTH\_SOURCE =} \StringTok{\textasciigrave{}}\AttributeTok{Author(s) / Source}\StringTok{\textasciigrave{}}\NormalTok{, }\AttributeTok{TYPE =} \StringTok{\textasciigrave{}}\AttributeTok{Article Type}\StringTok{\textasciigrave{}}\NormalTok{, }\AttributeTok{THEME\_MAIN=}\StringTok{\textasciigrave{}}\AttributeTok{Theme(s)}\StringTok{\textasciigrave{}}\NormalTok{, }\AttributeTok{THEME\_SUB =} \StringTok{\textasciigrave{}}\AttributeTok{Sub{-}Theme(s)}\StringTok{\textasciigrave{}}\NormalTok{) }
+\ControlFlowTok{for}\NormalTok{( i }\ControlFlowTok{in} \FunctionTok{colnames}\NormalTok{(db))\{}
+    \FunctionTok{colnames}\NormalTok{(db)[}\FunctionTok{which}\NormalTok{(}\FunctionTok{colnames}\NormalTok{(db)}\SpecialCharTok{==}\NormalTok{i)] }\OtherTok{=} \FunctionTok{toupper}\NormalTok{(i)}
+\NormalTok{ \}}
+\CommentTok{\# Convert date format to YYYY/MM/DD for analysis and sorting by date }
+\NormalTok{db}\SpecialCharTok{$}\NormalTok{DATE }\OtherTok{\textless{}{-}} \FunctionTok{as.Date}\NormalTok{(lubridate}\SpecialCharTok{::}\FunctionTok{parse\_date\_time}\NormalTok{(db}\SpecialCharTok{$}\NormalTok{DATE, }\FunctionTok{c}\NormalTok{(}\StringTok{\textquotesingle{}dmy\textquotesingle{}}\NormalTok{, }\StringTok{\textquotesingle{}ymd\textquotesingle{}}\NormalTok{)))}
+
+\CommentTok{\#\textgreater{} Remove empty records where all columns are "NA"}
+\CommentTok{\# Following filters rows with at least one column not "NA"}
+\NormalTok{db }\OtherTok{\textless{}{-}}\NormalTok{ janitor}\SpecialCharTok{::}\FunctionTok{remove\_empty}\NormalTok{(db, }\AttributeTok{which =} \StringTok{"rows"}\NormalTok{)}
+
+\CommentTok{\#\textgreater{} Remove duplicates}
+\NormalTok{db }\OtherTok{\textless{}{-}}\NormalTok{ db }\SpecialCharTok{|}\ErrorTok{\textgreater{}} \FunctionTok{distinct}\NormalTok{()}
+
+\CommentTok{\# Add unique ID column}
+\CommentTok{\# First sort by date (oldest first)}
+\NormalTok{db }\OtherTok{\textless{}{-}}\NormalTok{ db }\SpecialCharTok{|}\ErrorTok{\textgreater{}} 
+  \FunctionTok{arrange}\NormalTok{(DATE)}
+\CommentTok{\# Add ID col}
+\NormalTok{db}\SpecialCharTok{$}\NormalTok{UID }\OtherTok{\textless{}{-}} \FunctionTok{seq.int}\NormalTok{(}\FunctionTok{nrow}\NormalTok{(db))}
+\CommentTok{\# Bring new UID column to front}
+\NormalTok{db }\OtherTok{\textless{}{-}}\NormalTok{ db }\SpecialCharTok{|}\ErrorTok{\textgreater{}} \FunctionTok{select}\NormalTok{(UID, }\FunctionTok{everything}\NormalTok{())}
+\end{Highlighting}
+\end{Shaded}
+
+Processed database (``db'') after cleaning and pre-processing
+
+\begin{verbatim}
+## Rows: 1,524
+## Columns: 10
+## $ UID         <int> 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17,~
+## $ TITLE       <chr> "Cities and local governments at the forefront in building~
+## $ AUTH_SOURCE <chr> "FAO", "Joy Carey", NA, "Mary Quicke", "Jonty Bloom", "The~
+## $ TYPE        <chr> "Report", "Report", "Web page", "Blog post", "News article~
+## $ DATE        <date> 2019-07-28, 2020-03-14, 2020-03-14, 2020-03-14, 2020-03-2~
+## $ THEME_MAIN  <chr> "Urban Food Systems", "Urban Food Systems", "Dairy &amp; C~
+## $ WWW         <chr> "<a href=\"http://www.fao.org/documents/card/en/c/cb0407en~
+## $ THEME_SUB   <chr> "Urban Food Systems – General", "Urban Food Systems – Gene~
+## $ SUMMARY     <chr> "Survey data and case studies from cities around the world~
+## $ KEYWORDS    <chr> "global, urban food systems, resilience, food security", "~
+\end{verbatim}
+
+\hypertarget{eda---themes}{%
+\subsection{2. EDA - Themes}\label{eda---themes}}
+
+This section focuses on an exploratory analysis of the ``THEMES'' and
+``SUB-THEMES'' columns.
+
+\hypertarget{total-counts}{%
+\subsubsection{2.1 Total counts}\label{total-counts}}
+
+\end{document}
