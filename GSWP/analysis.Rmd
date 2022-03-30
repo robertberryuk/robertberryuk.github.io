@@ -1,0 +1,4324 @@
+---
+title: "Agricultural Transition: Great South West Partnership"
+author: "Robert Berry"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    toc_depth: 4
+    smooth_scroll: yes
+    theme: united
+    code_folding: hide
+    highlight: tango
+  pdf_document:
+    toc: yes
+    toc_depth: '4'
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, warning=FALSE)
+```
+<br />
+The aim of this website is to report the ongoing geospatial data analysis for the CCRI's Agricultural Transition: Great South West Partnership project. All of the tables and plots shown on this website can also be accessed as individual files [HERE](https://connectglosac.sharepoint.com/:f:/s/ccriprojects/EkmH8fOBINtNlhpJy_J-mqIBYQEk-p6fjgTJec68p_ji6A?e=hn0WaW). The full [R programming](https://www.r-project.org/about.html) code used to perform the work is included in this report, and can be accessed by clicking on the "Code" buttons. If you are unfamiliar with R code, comments (in plain English) have been added to describe the operation of each code block, so it should be possible to follow the methodology. 
+
+<br />
+
+## 1. Pillar 1: County-level
+
+This section shows the code and outputs for the analysis of Pillar 1 (P1) payments at county level (for the counties of **Cornwall**, **Devon**, **Dorset**, and **Somerset**)
+
+<br />
+
+### 1.1 Data import & cleaning
+
+Import and cleaning of the CAP Payments (data source: [HERE](https://cap-payments.defra.gov.uk/Search.aspx))  
+
+**Step 1** - Load code packages and import data
+ 
+```{r echo=TRUE, eval=TRUE}
+#> 1.1.1 Load libraries 
+library(tidyverse) # data munging and analysis
+library(sf) # simple features for GIS
+library(qgisprocess) # access to QGIS algorithms
+library(here) # relative path management for reproducibility
+library(lubridate) # for date string manipulation/conversion
+library(janitor) # data cleaning functions
+library(knitr) # report rendering with rmarkdown
+library(ggplot2) # plots and visualisations
+library(readxl) # import xls
+library(scales) # for plot scale customisation
+library(mapproj) # map zoom coords
+library(leaflet) # interactive web maps
+library(reshape2) # to reshape data (used for "melt" function)
+library(units) # to convert from m2 to km2
+  
+#> 1.1.2 Import data (trimming white space)
+#> "RPA" sheet
+rpa.1 <- readxl::read_xlsx(here("In", "BPS_Glos", "2020_All_CAP_Search_Results_Data_P14.xlsx"), trim_ws = TRUE, sheet = "RPA")
+#> "RPA2" sheet
+rpa.2 <- readxl::read_xlsx(here("In", "BPS_Glos", "2020_All_CAP_Search_Results_Data_P14.xlsx"), trim_ws = TRUE, sheet = "RPA2")
+
+```
+
+**Step 2** - Data cleaning and pre-processing
+
+```{r echo=TRUE, eval=TRUE}
+#> 1.1.3 Data cleaning and pre-processing
+
+#> Bind the two RPA tables together (they are split alphabetically by beneficiary name)
+db <- rbind(rpa.1, rpa.2)
+
+#> Remove duplicates
+db <- db %>% 
+  distinct()
+
+#> Remove any empty records where all columns are "NA"
+# Following filters rows with at least one column not "NA"
+db <- janitor::remove_empty(db, which = "rows")
+
+#> Select only relevant rcolumns
+db <- db %>% 
+  select("BeneficiaryCode", "PostcodePrefix_F202B", "TownCity_F202C", "Basic payment scheme", "Greening: practices beneficial for climate and environment") |> 
+  arrange(desc(`Basic payment scheme`))
+
+
+```
+
+
+Table 1.1.1 Full database on import = *`r toString(nrow(db))`* records (all England)
+```{r echo=FALSE, eval=TRUE, message=FALSE, warning=FALSE}
+#> Glimpse
+glimpse(db)
+```
+
+Table 1.1.2 First 6 rows of database
+```{r echo=FALSE, eval=TRUE, message=FALSE, warning=FALSE}
+#> Head
+head(db)
+```
+
+
+
+<br />
+
+
+### 1.2 Land cover processing
+
+The CAP Payments dataset reports payments at postcode district level, but postcode districts do not conform to administrative boundaries (e.g. counties, district unitary authorities). Our approach is to calculate the area of agricultural land (using Corine land cover data) within each postcode district, and to use this to calculate the P1 payments. For districts which straddle county boundaries, the area of agricultural land both inside and outside of the target county are calculated, and the P1 payments are calculated based on the proportion of agricultural land inside the boundary. Agricultural land cover classes were extracted from the Corine 2018 land cover dataset and used for the agricultural area calculations. 
+
+The following geospatial datasets are used for this analysis: <br />
+ - County boundaries - [(OS BoundaryLine)](https://www.ordnancesurvey.co.uk/business-government/products/boundaryline) <br />
+ - Postcode district areas - [(OpenDoor Postcode Districts)](https://www.opendoorlogistics.com/data/) <br />
+ - Land Cover data - [(Corine 2018)](https://catalogue.ceh.ac.uk/documents/084e0bc6-e67f-4dad-9de6-0c698f60e34d) <br /> 
+ 
+```{r echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE, results='hide'}
+
+#> Import county boundaries
+#> Import ceremonial counties polygon layer from OS BoundaryLine dataset
+counties.sw <- st_read(here("In", "Shape", "South_West.UPDATED.3.shp"), quiet = TRUE)
+
+# glimpse(counties.sw)
+
+#> Remove the deleted Bath and NE Somerset polygon (result of pre-geoprocessing in QGIS)
+counties.sw <- counties.sw |> 
+  filter(is.na(NAME_2))
+
+#> Import postcode district boundary polygon data (source: https://www.opendoorlogistics.com/downloads/)
+pcodes.gb <- st_read(here("In", "Shape", "Pcode_Districts_OpenDoor_2017.shp"), quiet = TRUE)
+
+#> Import CORINE 2018 land cover data (polygons)
+#> Data source: https://catalogue.ceh.ac.uk/documents/084e0bc6-e67f-4dad-9de6-0c698f60e34d
+corine.gb <- st_read(here("In", "Shape", "corine_2018_GB.shp"), quiet = TRUE)
+#> Select only agri land classes:
+# 211 - Non-irrigated arable land
+# 212 - Permanently irrigated land
+# 213 - Rice fields
+# 221 - Vineyards
+# 222 - Fruit trees and berry plantations
+# 223 - Olive groves
+# 231 - Pastures
+# 241 - Annual crops associated with permanent crops
+# 242 - Complex cultivation patterns
+# 243 - Land principally occupied by agriculture with significant areas of natural vegetation
+# 244 - Agro-forestry areas
+# 321 - Natural grasslands
+# 322 - Moors and heathland
+# 412 - Peatbogs
+agri.land.classes <- c("211", "212", "213", "221", "222", "223", "231", "241", "242", "243", "244", "321", "322", "412")
+#> Subset data based on land cover codes
+corine.agri <- corine.gb |> 
+  select(ID, CODE_18) |> 
+  filter(CODE_18 %in% agri.land.classes)
+
+
+
+
+  
+#> Export agri data for detailed visual checking in QGIS
+#> Remove previous shapefile export
+unlink(here("Out", "Tests", "Corine_Agri.shp"))
+unlink(here("Out", "Tests", "Corine_Agri.dbf"))
+unlink(here("Out", "Tests", "Corine_Agri.prj"))
+unlink(here("Out", "Tests", "Corine_Agri.shx"))
+st_write(corine.agri, here("Out", "Tests", "Corine_Agri.shp"), quiet = TRUE)
+
+#> Show an example plot of agri land extracted from Corine
+#> Get Cornwall boundaries
+cornwall.sf <- counties.sw |>
+  filter(NAME == "Cornwall")
+#> Clip corine.gb to extent of Cornwall
+corine.clip <- st_intersection(corine.agri,cornwall.sf)
+# 
+# #> Previous static map (superseded by Leaflet map)
+# #> Plot
+# plot0 <- ggplot(data = cornwall.sf) +
+#   ggtitle("Agricultural land: Cornwall (extracted from Corine 2018)") +
+#   # theme_bw() +
+#   geom_sf() +
+#   geom_sf(data = corine.clip, fill = "green")
+# #> Render on web page
+# print(plot0)
+
+```
+
+
+
+*Figure 1.2.1 Extent of agricultural land (derived from Corine 2018)*
+```{r out.width='100%', echo=TRUE}
+
+#> This code chunk produces an interactive leafelt map of the SW region with Corine agri land shown
+
+#> Subset counties.gb, selecting only Cornwall (inc Isles of Scilly), Devon, Somerset, and Dorset
+#> Will also use this string in Section 1.3 loop
+#> Create filter string (get names first!)
+counties <- c("Cornwall", "Devon", "Dorset", "Somerset")
+#> Create sf object of 4 counties
+south.west <- counties.sw |>
+  filter(NAME %in% counties)
+#> Import clipped (to SW region) dissolved layer of Corine agri
+#> Pre-processed in QGIS and imported as process in R takes too long
+corine.sw <- st_read(here("In", "Shape", "Corine.sw.clip.diss.simp.100.diss3.shp"), quiet = TRUE)
+#> Convert layers to WGS84 for use with Leaflet
+south.west <- st_transform(south.west, 4326)
+corine.sw <- st_transform(corine.sw, 4326)
+#> Create Leaflet map
+leaflet() |>
+  addPolygons(data = corine.sw, fillOpacity = 0.5, color = "green", stroke = FALSE) |>
+  addPolygons(data = south.west, fillOpacity = 0, label = TRUE) |>
+  addTiles()
+
+```
+
+
+### 1.3 Reduction calculations
+
+With all the required input data in place, P1 payments at county level can now be computed. A brief overview of the workflow: <br />
+
+- **Step 1**: Select the four target counties from the GB county data layer <br />
+- **Step 2**: Initiate a programming loop based on the counties (i.e. same code block is run for each county in turn) <br />
+- **Step 3**: Create a spatial layer of postcode districts that spatially intersect with the "active" county  <br />
+- **Step 4**: Create a spatial layer of postcode districts clipped exactly to the extent of the "active" county  <br />
+- **Step 5**: Create a spatial layer of postcode districts clipped exactly to the extent of the "active" county  <br />
+- **Step 6**: Using the Corine data on agricultural land area (prepared in Section 1.2), calculate the agricultural land area totals for intersected postcode district polygons, and clipped postcode district polygons respectively. This gives us two values: 1) the total area of agricultural land in each postcode district, and; 2) the area of agricultural land in each postcode district that is *within* the active county  <br />
+- **Step 7**: Using the agricultural land area proportions and the P1 reduction figures, calculate the "baseline" value for P1 in 2020 and following years with payments applied up to and including 2027 <br />
+- **Step 8**: Display output tables and bar plots  <br />
+- **Step 9**: Export output tables and bar plots to CCRI shared drive  <br />
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+#> Create filter string (get names first!)
+counties <- c("Cornwall", "Devon", "Dorset", "Somerset")
+
+#> Sequential integer counter (for figure numbers)
+i <-0 
+
+#> Initiate loop
+for(active_county in counties){
+  
+#> Loop counter (for table caption number)
+i <- i+1
+
+#> Select target county (this will be start of loop)
+county <- counties.sw |> 
+  filter(NAME == active_county)
+
+#> Select postcode district areas that intersect with active county polygon
+pcodes.int <- pcodes.gb[county,]
+#> Add area (km2) column
+pcodes.int$AreaM2 <- st_area(pcodes.int)
+#> Convert from m2 to km2
+pcodes.int$AREA_KM2_TOTAL <- pcodes.int$AreaM2 / 1000000
+pcodes.int$AREA_KM2_TOTAL <- round(pcodes.int$AREA_KM2_TOTAL, digits = 3)
+pcodes.int$AREA_KM2_TOTAL <- as.numeric(pcodes.int$AREA_KM2_TOTAL)
+#> Export data for detailed visual checking in QGIS
+#> Remove existing shapefile
+unlink(here("Out", "Tests", "pcodes.int.shp"))
+unlink(here("Out", "Tests", "pcodes.int.dbf"))
+unlink(here("Out", "Tests", "pcodes.int.prj"))
+unlink(here("Out", "Tests", "pcodes.int.shx"))
+st_write(pcodes.int, here("Out", "Tests", "pcodes.int.shp"), quiet = TRUE)
+
+
+#> Generate a layer of clipped (cookie cutter) postcodes using active county boundary
+pcodes.clip <- st_intersection(pcodes.int, county)
+#> Add area (km2) column
+pcodes.clip$AreaM2 <- st_area(pcodes.clip)
+#> Convert from m2 to km2
+pcodes.clip$AREA_KM2_CLIP<- pcodes.clip$AreaM2 / 1000000
+pcodes.clip$AREA_KM2_CLIP <- round(pcodes.clip$AREA_KM2_CLIP, digits = 3)
+pcodes.clip$AREA_KM2_CLIP <- as.numeric(pcodes.clip$AREA_KM2_CLIP)
+#> Export data for detailed visual checking in QGIS
+#> Remove existing shapefile
+unlink(here("Out", "Tests", "pcodes.clip.shp"))
+unlink(here("Out", "Tests", "pcodes.clip.dbf"))
+unlink(here("Out", "Tests", "pcodes.clip.prj"))
+unlink(here("Out", "Tests", "pcodes.clip.shx"))
+st_write(pcodes.clip, here("Out", "Tests", "pcodes.clip.shp"), quiet = TRUE)
+
+
+#> To calculate agri land differences for postcodes which straddle the boundary of target county...
+#> 1. Intersect pcodes.int with corine.agri, to calculate area of agri land for all intersecting pcode district polys (whole polygon)
+#> 2. Intersect pcodes.clip with corine.int to calculate area of agri land ony within target county polygon
+#> 3. Calculate percentage difference between the TWO sets of area calculations to gove % of agri land in each pcode district polygon
+
+
+#> 1. Intersect pcodes.int with corine.agri, to calculate area of agri land for all intersecting pcode district polys (whole polygon)
+agri.int.total <- st_intersection(pcodes.int, corine.agri)
+#> Calculate area of Corine agri land
+agri.int.total$AREA_AGRI_TOTAL <- st_area(agri.int.total)
+#> Convert from m2 to km2
+agri.int.total$AREA_AGRI_TOTAL <- agri.int.total$AREA_AGRI_TOTAL / 1000000
+agri.int.total$AREA_AGRI_TOTAL <- round(agri.int.total$AREA_AGRI_TOTAL, digits = 3)
+agri.int.total$AREA_AGRI_TOTAL <- as.numeric(agri.int.total$AREA_AGRI_TOTAL)
+#> Export data for detailed visual checking in QGIS
+#> Remove existing shapefile
+unlink(here("Out", "Tests", "agri.int.total.shp"))
+unlink(here("Out", "Tests", "agri.int.total.dbf"))
+unlink(here("Out", "Tests", "agri.int.total.prj"))
+unlink(here("Out", "Tests", "agri.int.total.shx"))
+st_write(agri.int.total, here("Out", "Tests", "agri.int.total.shp"), quiet = TRUE)
+#> Create grouped (by pcode) non-geo version of the table
+st_geometry(agri.int.total) <- NULL
+agri.int.total <- agri.int.total |> 
+  select(name, AREA_AGRI_TOTAL) |> 
+  group_by(name) |> 
+  summarise(AGRI_TOTAL = sum(AREA_AGRI_TOTAL))
+
+
+#> 2. Intersect pcodes.clip with corine.int to calculate area of agri land ony within target county polygon
+agri.int.clip <- st_intersection(pcodes.clip, corine.agri)
+#> Calculate area of Corine agri land
+agri.int.clip$AREA_AGRI_CLIP <- st_area(agri.int.clip)
+#> Convert from m2 to km2
+agri.int.clip$AREA_AGRI_CLIP <- agri.int.clip$AREA_AGRI_CLIP / 1000000
+agri.int.clip$AREA_AGRI_CLIP <- round(agri.int.clip$AREA_AGRI_CLIP, digits = 3)
+agri.int.clip$AREA_AGRI_CLIP <- as.numeric(agri.int.clip$AREA_AGRI_CLIP)
+#> Export data for detailed visual checking in QGIS
+#> Remove existing shapefile
+unlink(here("Out", "Tests", "agri.int.clip.shp"))
+unlink(here("Out", "Tests", "agri.int.clip.dbf"))
+unlink(here("Out", "Tests", "agri.int.clip.prj"))
+unlink(here("Out", "Tests", "agri.int.clip.shx"))
+st_write(agri.int.clip, here("Out", "Tests", "agri.int.clip.shp"), quiet = TRUE)
+#> Create grouped (by pcode) non-geo version of the table
+st_geometry(agri.int.clip) <- NULL
+agri.int.clip <- agri.int.clip |> 
+  select(name, AREA_AGRI_CLIP) |> 
+  group_by(name) |> 
+  summarise(AGRI_CLIP = sum(AREA_AGRI_CLIP))
+
+
+#> 3. Calculate percentage difference between the two sets of area calculations to gove % of agri land in each pcode district polygon
+#> Merge the two data frames to show size of agri area within and outside target county
+agri.merge <- merge(agri.int.total, agri.int.clip, by = "name", all.x = TRUE)
+#> Round area calcs up to 1 decimal place (to negate effect of small amounts of agri land being lost when clipped)
+agri.merge$AGRI_TOTAL <- round(agri.merge$AGRI_TOTAL, digits = 3)
+agri.merge$AGRI_CLIP <- round(agri.merge$AGRI_CLIP, digits = 2)
+#> Calculate percentage of agri land within target county 
+agri.merge$PCENT_AGRI_LAND <- agri.merge$AGRI_CLIP/ agri.merge$AGRI_TOTAL
+#> Round up
+agri.merge$PCENT_AGRI_LAND <- round(agri.merge$PCENT_AGRI_LAND, digits = 3)
+
+
+
+#> Extract postcode districts from the BPS source data ("db") which intersect with the active county polygon boundary
+#> Do this via a merge between db and pcodes.int, keeping only matching records in a new data frame
+#> Rename pcodes.in and drop geom
+pcodes.active <- pcodes.int
+st_geometry(pcodes.active) <- NULL
+BPS.merge <- merge(db, pcodes.active, by.x = "PostcodePrefix_F202B", "name", all.x = FALSE)
+#> Convert all NAs to zeros in data frame
+BPS.merge[is.na(BPS.merge)] <- 0
+
+
+
+#> BPS Calcs by year
+
+#> 2020
+#> Create table with baseline P1 (BPS + Greening) payments by postcode district for 2020 (no payments applied)
+t1.2020 <- BPS.merge %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2020_Baseline = sum(`Basic payment scheme`) + sum(`Greening: practices beneficial for climate and environment`))
+#> Check sum total of P1 for reference
+sum.original.p1 <- sum(t1.2020$P1_2020_Baseline)
+#> Merge with agri.merge data frame to append 2020 calcs and create new master table "t1"
+t1 <- merge(t1.2020, agri.merge, by.x = "PostcodePrefix_F202B", by.y = "name")
+#> #> Calculate P1 payment based on area of agri land within each postcode area
+t1$P1_2020 <- t1$P1_2020_Baseline * t1$PCENT_AGRI_LAND
+#> Round to 2 decimal places
+t1$P1_2020 <- round(t1$P1_2020, digits = 2)
+
+
+
+#> 2021
+t1.2021 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2021$P1_2020 <- t1.2021$`Basic payment scheme` + t1.2021$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2021 payments
+t1.2021 <- t1.2021 %>% 
+  mutate(P1_2021 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.95,
+                              (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.90,
+                              (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.80,
+                              P1_2020 > 150000 ~ P1_2020 * 0.75))
+# Group by postcode an summarise
+t1.2021 <- t1.2021 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2021 = sum(P1_2021))
+#> Round
+t1.2021$P1_2021 <- round(t1.2021$P1_2021, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2021, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2021 <- t1$P1_2021 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2021 <- round(t1$P1_2021, digits = 2)
+#> Check sum
+sum.p1.2021 <- sum(t1$P1_2021)
+
+
+
+#> 2022
+t1.2022 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2022$P1_2020 <- t1.2022$`Basic payment scheme` + t1.2022$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2022 payments
+t1.2022 <- t1.2022 %>% 
+   mutate(P1_2022 = case_when(P1_2020<=30000 ~ P1_2020* 0.80,
+                             (P1_2020>30000 & P1_2020<=50000) ~ P1_2020* 0.75,
+                             (P1_2020>50000 & P1_2020<=150000) ~ P1_2020* 0.65,
+                             P1_2020> 150000 ~ P1_2020* 0.60))
+# Group by postcode an summarise
+t1.2022 <- t1.2022 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2022 = sum(P1_2022))
+#> Round
+t1.2022$P1_2022 <- round(t1.2022$P1_2022, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2022, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2022 <- t1$P1_2022 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2022 <- round(t1$P1_2022, digits = 2)
+#> Check sum
+sum.p1.2022 <- sum(t1$P1_2022)
+
+
+#> 2023
+t1.2023 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2023$P1_2020 <- t1.2023$`Basic payment scheme` + t1.2023$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2023 payments
+t1.2023 <- t1.2023 %>% 
+  mutate(P1_2023 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.65,
+                             (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.60,
+                             (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.50,
+                             P1_2020 > 150000 ~ P1_2020 * 0.45))
+# Group by postcode an summarise
+t1.2023 <- t1.2023 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2023 = sum(P1_2023))
+#> Round
+t1.2023$P1_2023 <- round(t1.2023$P1_2023, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2023, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2023 <- t1$P1_2023 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2023 <- round(t1$P1_2023, digits = 2)
+#> Check sum
+sum.p1.2023 <- sum(t1$P1_2023)
+
+
+#> 2024
+t1.2024 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2024$P1_2020 <- t1.2024$`Basic payment scheme` + t1.2024$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2024 payments
+t1.2024 <- t1.2024 %>% 
+  mutate(P1_2024 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.50,
+                             (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.45,
+                             (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.35,
+                             P1_2020 > 150000 ~ P1_2020 * 0.30))
+# Group by postcode an summarise
+t1.2024 <- t1.2024 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2024 = sum(P1_2024))
+#> Round
+t1.2024$P1_2024 <- round(t1.2024$P1_2024, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2024, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2024 <- t1$P1_2024 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2024 <- round(t1$P1_2024, digits = 2)
+#> Check sum
+sum.p1.2024 <- sum(t1$P1_2024)
+
+
+#> 2025
+t1.2025 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2025$P1_2020 <- t1.2025$`Basic payment scheme` + t1.2025$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2025 payments
+t1.2025 <- t1.2025 %>% 
+ mutate(P1_2025 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.40,
+                             (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.35,
+                             (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.25,
+                             P1_2020 > 150000 ~ P1_2020 * 0.20))
+# Group by postcode an summarise
+t1.2025 <- t1.2025 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2025 = sum(P1_2025))
+#> Round
+t1.2025$P1_2025 <- round(t1.2025$P1_2025, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2025, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2025 <- t1$P1_2025 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2025 <- round(t1$P1_2025, digits = 2)
+#> Check sum
+sum.p1.2025 <- sum(t1$P1_2025)
+
+
+#> 2026
+t1.2026 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2026$P1_2020 <- t1.2026$`Basic payment scheme` + t1.2026$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2026 payments
+t1.2026 <- t1.2026 %>% 
+  mutate(P1_2026 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.25,
+                             (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.25,
+                             (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.15,
+                             P1_2020 > 150000 ~ P1_2020 * 0.15))
+# Group by postcode an summarise
+t1.2026 <- t1.2026 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2026 = sum(P1_2026))
+#> Round
+t1.2026$P1_2026 <- round(t1.2026$P1_2026, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2026, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2026 <- t1$P1_2026 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2026 <- round(t1$P1_2026, digits = 2)
+#> Check sum
+sum.p1.2026 <- sum(t1$P1_2026)
+
+
+#> 2027
+t1.2027 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2027$P1_2020 <- t1.2027$`Basic payment scheme` + t1.2027$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2027 payments
+t1.2027 <- t1.2027 %>% 
+   mutate(P1_2027 = case_when(P1_2020<=30000 ~ P1_2020* 0.15,
+                             (P1_2020>30000 & P1_2020<=50000) ~ P1_2020* 0.15,
+                             (P1_2020>50000 & P1_2020<=150000) ~ P1_2020* 0.10,
+                             P1_2020> 150000 ~ P1_2020* 0.10))
+# Group by postcode an summarise
+t1.2027 <- t1.2027 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2027 = sum(P1_2027))
+#> Round
+t1.2027$P1_2027 <- round(t1.2027$P1_2027, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2027, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2027 <- t1$P1_2027 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2027 <- round(t1$P1_2027, digits = 2)
+#> Check sum
+sum.p1.2027 <- sum(t1$P1_2027)
+
+#> Convert all NAs to zeros in data frame
+t1[is.na(t1)] <- 0
+
+
+
+#> Create plot
+
+#> P1 payments by year
+p1.in <- as.data.frame(colSums(t1[6:13]))
+#> Change rownames to column "Value"
+p1.plot <- tibble::rownames_to_column(p1.in, "VALUE")
+#> Extract year from string
+p1.plot$VALUE <- sub("^.*([0-9]{4}).*", "\\1", p1.plot$VALUE)
+names(p1.plot)[1]<-paste("Year")
+names(p1.plot)[2]<-paste("Value_bps")
+
+#> Print table t1 on web page
+print(knitr::kable(t1, col.names = c("PC", "2020_Unadjusted", "Agri_Total", "Agri_In", "Agri_PC", "2020", "2021", "2022", "2023", "2024", "2025", "2026", "2027"), caption = paste0("Table 1.", i , " ", "P1 payments by postcode district - ",  active_county)))
+
+#> Add line breaks
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+
+
+# Simple bar chart
+plot1 <- ggplot(p1.plot, aes(x=Year, y=Value_bps)) + 
+  theme_bw() +
+  geom_bar(stat = "identity", fill="#2c66b8", width = 0.6) +
+  geom_text(aes(label= paste0(round(Value_bps / 1000000, digits = 1), " M")), vjust = 1.5, colour = "white") +
+  labs(title = paste0("Pillar 1 payments:", " ", active_county), x = "Year", y = "Value (£)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 16, b = 0, l = 0))) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(legend.position="none") +
+  scale_y_continuous(labels = scales::unit_format(unit = "M", scale = 1e-6))
+plot1
+
+#> Add line breaks
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+
+#> Render on web page
+print(plot1)
+
+#> Export the plot
+ggsave(here("Out", "P1", "County", "Plot", paste0("P1_payments_", active_county, ".png")))
+
+#> Export final t1 table
+write_csv(t1, here("Out", "P1", "County", "CSV", paste0("P1_payments_", active_county, ".csv")))
+
+}
+          
+
+```
+
+
+
+### 1.4 Claimant numbers
+
+<br />
+
+Calculating the number of P1 claimants in each county (2020 RPA data)
+
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+
+
+#> Create filter string (get names first!)
+counties <- c("Cornwall", "Devon", "Dorset", "Somerset")
+
+#> Sequential integer counter (for figure numbers)
+i <-0 
+
+#> Initiate loop
+for(active_county in counties){
+  
+#> Loop counter (for table caption number)
+i <- i+1
+
+#> Load reductions table for each county
+p1.red.active <- read_csv(here("Out", "P1", "County", "CSV", paste0("P1_Reductions_", active_county, ".csv")))
+p1.red.active  <- p1.red.active |> 
+  rename(Pcode_District = PostcodePrefix_F202B)
+
+#> From the above table, extract a postcode district lookup table for merging with raw RPA data
+p1.pcodes <- p1.red.active |> 
+  select(Pcode_District)
+
+#> Merge with RPA data
+p1.rpa <- merge(db, p1.pcodes, by.x = "PostcodePrefix_F202B",  by.y = "Pcode_District")
+p1.rpa <- p1.rpa |> 
+  rename(Pcode_District = PostcodePrefix_F202B)
+
+#> Group by postcode and summarise (count of claimants)
+p1.claims.sum <- p1.rpa |> 
+  select(Pcode_District) |> 
+  group_by(Pcode_District) |> 
+  summarise(Claimants = n())
+  
+
+#> Merge back with reductions table for target count to obtain % agri land in pcode area for claimant estimation
+p1.claims <- merge(p1.claims.sum, p1.red.active, by = "Pcode_District", all.x = TRUE)
+p1.claims <- p1.claims |> 
+  select(Pcode_District, Claimants, PCENT_AGRI_LAND) |> 
+  mutate(Claimants_Est = Claimants * PCENT_AGRI_LAND)
+p1.claims$Claimants_Est <- round(p1.claims$Claimants_Est, digits = 0)
+
+#> Create summary table showing total number of claimants per county
+p1.claims.total <- as.data.frame(sum(p1.claims$Claimants_Est))
+p1.claims.total <- p1.claims.total |>
+  rename(Total = `sum(p1.claims$Claimants_Est)`)
+
+ 
+#> Print table on web page
+print(knitr::kable(p1.claims, caption = paste0("Table 1.4.", i , " ", "No. of P1 claimants by postcode district - ",  active_county, " (TOTAL = ", p1.claims.total$Total, ")")))
+
+
+
+#> Export table
+write_csv(p1.claims, here("Out", "Claimants", "CSV", paste0("P1_Claimants_by_Pcode_District_", active_county, ".csv")))
+
+#> Export totals table
+write_csv(p1.claims.total, here("Out", "Claimants", "CSV", paste0("P1_Total_Claimants_", active_county, ".csv")))
+
+
+}
+
+
+```
+
+
+
+<br />
+<br />
+
+
+
+## 2. Pillar 1: District-level
+
+Calculation of P1 payment payments at sub-county (district unitary authority) level. Uses same basic methodology as above, but the level of data management complexity is higher due to multiple area-within-area p1 reduction calculations.
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+
+#> Get district boundary data for SW counties
+districts.sw <- st_read(here("In", "Shape", "Districts.SW.UPDATED.2.shp"), quiet = TRUE)
+#> Convert Sw counties layer back to British National Grid
+south.west <- st_transform(south.west, 27700)
+#> Join districts with SW counties
+districts.sw <- st_join(districts.sw, south.west, largest = TRUE) |> 
+  filter(!is.na(NAME.y)) |> 
+  select(NAME.x, NAME.y) |> 
+  rename(NAME_DISTRICT = NAME.x, NAME_COUNTY = NAME.y) 
+
+#? Remove string "(B)" from district names
+# # districts.sw$NAME <- str_remove_all(districts.sw$NAME, "(B)")
+districts.sw$NAME_DISTRICT <- gsub("\\s*\\([^\\)]+\\)", "", districts.sw$NAME_DISTRICT)
+#> Trim WS
+districts.sw$NAME_DISTRICT <- trimws(districts.sw$NAME_DISTRICT)
+# head(districts.sw)
+
+#> Create an empty data table to hold the P1 payments for districts - will be populated in below loop
+district.summary <- data.frame(Name=character(),
+                                P1_2020=as.numeric(),
+                                P1_2021=as.numeric(),
+                                P1_2022=as.numeric(), 
+                                P1_2023=as.numeric(), 
+                                P1_2024=as.numeric(), 
+                                P1_2025=as.numeric(), 
+                                P1_2026=as.numeric(), 
+                                P1_2027=as.numeric())
+                         
+
+
+#> Sequential integer counter (for figure numbers)
+i <-0
+
+#> Initiate for loop
+for(active_county in counties){
+
+#> Loop counter (for table caption number)
+i <- i+1
+
+
+#> Initiate for loop here
+#> For county in counties
+target_county <- counties.sw |>
+  filter(NAME == active_county)
+head(target_county)
+
+
+# #> Get the first county (example here without a loop = Cornwall)
+# #> For county in counties
+# target_county <- counties.gb |>
+#   filter(NAME == "Cornwall")
+
+
+#> Clip districts.sw to extent of counties (do for one county initially - Cornwall)
+districts.clip <- st_intersection(districts.sw, target_county) |> 
+#> Get only the districts that are officially within the active county
+  #> (During the st_join process some slightly overlapping districts from other counties may be joined
+  filter(NAME_COUNTY == active_county)
+
+head(active_county)
+head(districts.clip)
+
+#> NEED TO START ANOTHER FOR LOOP HERE TO LOOP THROUGH DISTRICTS WITHIN COUNTY
+#> FOR NOW CHOOSE ISLES OF SCILLY WITHOUT FOR LOOP
+districts <- as.list(districts.clip$NAME_DISTRICT)
+
+#> Initiate districts loop
+for(district in districts){
+
+active_district <- districts.clip |> 
+  filter(NAME_DISTRICT == district)
+head(active_district)
+
+#> Select postcode district areas that intersect with active district polygon
+pcodes.int <- pcodes.gb[active_district,]
+head(pcodes.int)
+#> Add area (km2) column
+pcodes.int$AreaM2 <- st_area(pcodes.int)
+#> Convert from m2 to km2
+pcodes.int$AREA_KM2_TOTAL <- pcodes.int$AreaM2 / 1000000
+pcodes.int$AREA_KM2_TOTAL <- round(pcodes.int$AREA_KM2_TOTAL, digits = 3)
+pcodes.int$AREA_KM2_TOTAL <- as.numeric(pcodes.int$AREA_KM2_TOTAL)
+#> Export data for detailed visual checking in QGIS
+#> Remove existing shapefile
+unlink(here("Out", "Tests", "pcodes.int.shp"))
+unlink(here("Out", "Tests", "pcodes.int.dbf"))
+unlink(here("Out", "Tests", "pcodes.int.prj"))
+unlink(here("Out", "Tests", "pcodes.int.shx"))
+st_write(pcodes.int, here("Out", "Tests", "pcodes.int.shp"), quiet = TRUE)
+
+
+#> Generate a layer of clipped (cookie cutter) postcodes using active district boundary
+pcodes.clip <- st_intersection(pcodes.int, active_district)
+#> Add area (km2) column
+pcodes.clip$AreaM2 <- st_area(pcodes.clip)
+#> Convert from m2 to km2
+pcodes.clip$AREA_KM2_CLIP<- pcodes.clip$AreaM2 / 1000000
+pcodes.clip$AREA_KM2_CLIP <- round(pcodes.clip$AREA_KM2_CLIP, digits = 3)
+pcodes.clip$AREA_KM2_CLIP <- as.numeric(pcodes.clip$AREA_KM2_CLIP)
+#> Export data for detailed visual checking in QGIS
+#> Remove existing shapefile
+unlink(here("Out", "Tests", "pcodes.clip.shp"))
+unlink(here("Out", "Tests", "pcodes.clip.dbf"))
+unlink(here("Out", "Tests", "pcodes.clip.prj"))
+unlink(here("Out", "Tests", "pcodes.clip.shx"))
+st_write(pcodes.clip, here("Out", "Tests", "pcodes.clip.shp"), quiet = TRUE)
+
+
+#> To calculate agri land differences for postcodes which straddle the boundary of district...
+#> 1. Intersect pcodes.int with corine.agri, to calculate area of agri land for all intersecting pcode district polys (whole polygon)
+#> 2. Intersect pcodes.clip with corine.int to calculate area of agri land ony within target district polygon
+#> 3. Calculate percentage difference between the TWO sets of area calculations to gove % of agri land in each pcode district polygon
+
+#> 1. Intersect pcodes.int with corine.agri, to calculate area of agri land for all intersecting pcode district polys (whole polygon)
+agri.int.total <- st_intersection(pcodes.int, corine.agri)
+head(agri.int.total)
+#> Calculate area of Corine agri land
+agri.int.total$AREA_AGRI_TOTAL <- st_area(agri.int.total)
+#> Convert from m2 to km2
+agri.int.total$AREA_AGRI_TOTAL <- agri.int.total$AREA_AGRI_TOTAL / 1000000
+agri.int.total$AREA_AGRI_TOTAL <- round(agri.int.total$AREA_AGRI_TOTAL, digits = 3)
+agri.int.total$AREA_AGRI_TOTAL <- as.numeric(agri.int.total$AREA_AGRI_TOTAL)
+#> Export data for detailed visual checking in QGIS
+#> Remove existing shapefile
+unlink(here("Out", "Tests", "agri.int.total.shp"))
+unlink(here("Out", "Tests", "agri.int.total.dbf"))
+unlink(here("Out", "Tests", "agri.int.total.prj"))
+unlink(here("Out", "Tests", "agri.int.total.shx"))
+st_write(agri.int.total, here("Out", "Tests", "agri.int.total.shp"), quiet = TRUE)
+#> Create grouped (by pcode) non-geo version of the table
+st_geometry(agri.int.total) <- NULL
+agri.int.total <- agri.int.total |> 
+  select(name, AREA_AGRI_TOTAL) |> 
+  group_by(name) |> 
+  summarise(AGRI_TOTAL = sum(AREA_AGRI_TOTAL))
+head(agri.int.total)
+
+
+
+#> 2. Intersect pcodes.clip with corine.int to calculate area of agri land ony within target district polygon
+agri.int.clip <- st_intersection(pcodes.clip, corine.agri)
+#> Calculate area of Corine agri land
+agri.int.clip$AREA_AGRI_CLIP <- st_area(agri.int.clip)
+#> Convert from m2 to km2
+agri.int.clip$AREA_AGRI_CLIP <- agri.int.clip$AREA_AGRI_CLIP / 1000000
+agri.int.clip$AREA_AGRI_CLIP <- round(agri.int.clip$AREA_AGRI_CLIP, digits = 3)
+agri.int.clip$AREA_AGRI_CLIP <- as.numeric(agri.int.clip$AREA_AGRI_CLIP)
+#> Export data for detailed visual checking in QGIS
+#> Remove existing shapefile
+unlink(here("Out", "Tests", "agri.int.clip.shp"))
+unlink(here("Out", "Tests", "agri.int.clip.dbf"))
+unlink(here("Out", "Tests", "agri.int.clip.prj"))
+unlink(here("Out", "Tests", "agri.int.clip.shx"))
+st_write(agri.int.clip, here("Out", "Tests", "agri.int.clip.shp"), quiet = TRUE)
+#> Create grouped (by pcode) non-geo version of the table
+st_geometry(agri.int.clip) <- NULL
+agri.int.clip <- agri.int.clip |> 
+  select(name, AREA_AGRI_CLIP) |> 
+  group_by(name) |> 
+  summarise(AGRI_CLIP = sum(AREA_AGRI_CLIP))
+
+
+#> 3. Calculate percentage difference between the two sets of area calculations to gove % of agri land in each pcode district polygon
+#> Merge the two data frames to show size of agri area within and outside target county
+agri.merge <- merge(agri.int.total, agri.int.clip, by = "name", all.x = TRUE)
+#> Round area calcs up to 1 decimal place (to negate effect of small amounts of agri land being lost when clipped)
+agri.merge$AGRI_TOTAL <- round(agri.merge$AGRI_TOTAL, digits = 3)
+agri.merge$AGRI_CLIP <- round(agri.merge$AGRI_CLIP, digits = 2)
+#> Calculate percentage of agri land within target county 
+agri.merge$PCENT_AGRI_LAND <- agri.merge$AGRI_CLIP/ agri.merge$AGRI_TOTAL
+#> Round up
+agri.merge$PCENT_AGRI_LAND <- round(agri.merge$PCENT_AGRI_LAND, digits = 3)
+head(agri.merge)
+
+
+#> Extract postcode districts from the BPS source data ("db") which intersect with the active county polygon boundary
+#> Do this via a merge between db and pcodes.int, keeping only matching records in a new data frame
+#> Rename pcodes.in and drop geom
+pcodes.active <- pcodes.int
+st_geometry(pcodes.active) <- NULL
+BPS.merge <- merge(db, pcodes.active, by.x = "PostcodePrefix_F202B", "name", all.x = FALSE)
+#> Convert all NAs to zeros in data frame
+BPS.merge[is.na(BPS.merge)] <- 0
+head(BPS.merge)
+
+
+#> BPS Calcs by year (for target district)
+
+#> 2020
+#> Create table with baseline P1 (BPS + Greening) payments by postcode district for 2020 (no payments applied)
+t1.2020 <- BPS.merge %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2020_Baseline = sum(`Basic payment scheme`) + sum(`Greening: practices beneficial for climate and environment`))
+#> Check sum total of P1 for reference
+sum.original.p1 <- sum(t1.2020$P1_2020_Baseline)
+#> Merge with agri.merge data frame to append 2020 calcs and create new master table "t1"
+t1 <- merge(t1.2020, agri.merge, by.x = "PostcodePrefix_F202B", by.y = "name")
+#> #> Calculate P1 payment based on area of agri land within each postcode area
+t1$P1_2020 <- t1$P1_2020_Baseline * t1$PCENT_AGRI_LAND
+#> Round to 2 decimal places
+t1$P1_2020 <- round(t1$P1_2020, digits = 2)
+
+
+
+
+#> 2021
+t1.2021 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2021$P1_2020 <- t1.2021$`Basic payment scheme` + t1.2021$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2021 payments
+t1.2021 <- t1.2021 %>% 
+  mutate(P1_2021 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.95,
+                              (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.90,
+                              (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.80,
+                              P1_2020 > 150000 ~ P1_2020 * 0.75))
+# Group by postcode an summarise
+t1.2021 <- t1.2021 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2021 = sum(P1_2021))
+#> Round
+t1.2021$P1_2021 <- round(t1.2021$P1_2021, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2021, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2021 <- t1$P1_2021 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2021 <- round(t1$P1_2021, digits = 2)
+#> Check sum
+sum.p1.2021 <- sum(t1$P1_2021)
+
+
+
+#> 2022
+t1.2022 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2022$P1_2020 <- t1.2022$`Basic payment scheme` + t1.2022$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2022 payments
+t1.2022 <- t1.2022 %>% 
+   mutate(P1_2022 = case_when(P1_2020<=30000 ~ P1_2020* 0.80,
+                             (P1_2020>30000 & P1_2020<=50000) ~ P1_2020* 0.75,
+                             (P1_2020>50000 & P1_2020<=150000) ~ P1_2020* 0.65,
+                             P1_2020> 150000 ~ P1_2020* 0.60))
+# Group by postcode an summarise
+t1.2022 <- t1.2022 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2022 = sum(P1_2022))
+#> Round
+t1.2022$P1_2022 <- round(t1.2022$P1_2022, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2022, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2022 <- t1$P1_2022 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2022 <- round(t1$P1_2022, digits = 2)
+#> Check sum
+sum.p1.2022 <- sum(t1$P1_2022)
+
+
+#> 2023
+t1.2023 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2023$P1_2020 <- t1.2023$`Basic payment scheme` + t1.2023$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2023 payments
+t1.2023 <- t1.2023 %>% 
+  mutate(P1_2023 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.65,
+                             (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.60,
+                             (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.50,
+                             P1_2020 > 150000 ~ P1_2020 * 0.45))
+# Group by postcode an summarise
+t1.2023 <- t1.2023 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2023 = sum(P1_2023))
+#> Round
+t1.2023$P1_2023 <- round(t1.2023$P1_2023, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2023, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2023 <- t1$P1_2023 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2023 <- round(t1$P1_2023, digits = 2)
+#> Check sum
+sum.p1.2023 <- sum(t1$P1_2023)
+
+
+#> 2024
+t1.2024 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2024$P1_2020 <- t1.2024$`Basic payment scheme` + t1.2024$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2024 payments
+t1.2024 <- t1.2024 %>% 
+  mutate(P1_2024 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.50,
+                             (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.45,
+                             (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.35,
+                             P1_2020 > 150000 ~ P1_2020 * 0.30))
+# Group by postcode an summarise
+t1.2024 <- t1.2024 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2024 = sum(P1_2024))
+#> Round
+t1.2024$P1_2024 <- round(t1.2024$P1_2024, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2024, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2024 <- t1$P1_2024 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2024 <- round(t1$P1_2024, digits = 2)
+#> Check sum
+sum.p1.2024 <- sum(t1$P1_2024)
+
+
+#> 2025
+t1.2025 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2025$P1_2020 <- t1.2025$`Basic payment scheme` + t1.2025$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2025 payments
+t1.2025 <- t1.2025 %>% 
+ mutate(P1_2025 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.40,
+                             (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.35,
+                             (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.25,
+                             P1_2020 > 150000 ~ P1_2020 * 0.20))
+# Group by postcode an summarise
+t1.2025 <- t1.2025 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2025 = sum(P1_2025))
+#> Round
+t1.2025$P1_2025 <- round(t1.2025$P1_2025, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2025, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2025 <- t1$P1_2025 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2025 <- round(t1$P1_2025, digits = 2)
+#> Check sum
+sum.p1.2025 <- sum(t1$P1_2025)
+
+
+#> 2026
+t1.2026 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2026$P1_2020 <- t1.2026$`Basic payment scheme` + t1.2026$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2026 payments
+t1.2026 <- t1.2026 %>% 
+  mutate(P1_2026 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.25,
+                             (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.25,
+                             (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.15,
+                             P1_2020 > 150000 ~ P1_2020 * 0.15))
+# Group by postcode an summarise
+t1.2026 <- t1.2026 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2026 = sum(P1_2026))
+#> Round
+t1.2026$P1_2026 <- round(t1.2026$P1_2026, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2026, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2026 <- t1$P1_2026 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2026 <- round(t1$P1_2026, digits = 2)
+#> Check sum
+sum.p1.2026 <- sum(t1$P1_2026)
+
+
+#> 2027
+t1.2027 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2027$P1_2020 <- t1.2027$`Basic payment scheme` + t1.2027$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2027 payments
+t1.2027 <- t1.2027 %>% 
+   mutate(P1_2027 = case_when(P1_2020<=30000 ~ P1_2020* 0.15,
+                             (P1_2020>30000 & P1_2020<=50000) ~ P1_2020* 0.15,
+                             (P1_2020>50000 & P1_2020<=150000) ~ P1_2020* 0.10,
+                             P1_2020> 150000 ~ P1_2020* 0.10))
+# Group by postcode an summarise
+t1.2027 <- t1.2027 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2027 = sum(P1_2027))
+#> Round
+t1.2027$P1_2027 <- round(t1.2027$P1_2027, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2027, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2027 <- t1$P1_2027 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2027 <- round(t1$P1_2027, digits = 2)
+#> Check sum
+sum.p1.2027 <- sum(t1$P1_2027)
+
+#> Convert all NAs to zeros in data frame
+t1[is.na(t1)] <- 0
+
+#> Create a new data frame to hold P1 reduction values by year summed for each district
+head(active_district)
+district.summary <- district.summary |> 
+  add_row(Name = district, 
+          P1_2020 = sum(t1$P1_2020),
+          P1_2021 = sum(t1$P1_2021),
+          P1_2022 = sum(t1$P1_2022),
+          P1_2023 = sum(t1$P1_2023),
+          P1_2024 = sum(t1$P1_2024),
+          P1_2025 = sum(t1$P1_2025),
+          P1_2026 = sum(t1$P1_2026),
+          P1_2027 = sum(t1$P1_2027))
+head(district.summary)
+#> Wipe t1 rows clean
+t1 <- t1[0,]
+
+
+
+#> Web plot
+
+}
+
+
+
+#> Print table district.summary on web page
+print(knitr::kable(district.summary, caption = paste0("Table 2.", i , " ", "P1 payments by district - ",  active_county)))
+
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+
+#> Create bar plots
+
+#> Get a list of districts from the active district.summary table
+districts.list <- as.list(district.summary$Name)
+
+for (district.active in districts.list)
+
+{
+
+#> Create data table with only active row (district) from districts.summary table
+df <- district.summary|> 
+  filter(Name == district.active)
+#> Shape data
+p2.in <- as.data.frame(colSums(df[2:9]))
+#> Change rownames to column "Value"
+p2.plot <- tibble::rownames_to_column(p2.in, "VALUE")
+#> Extract year from string
+p2.plot$VALUE <- sub("^.*([0-9]{4}).*", "\\1", p2.plot$VALUE)
+names(p2.plot)[1]<-paste("Year")
+names(p2.plot)[2]<-paste("Value_bps")
+
+# Simple bar chart
+plot2 <- ggplot(p2.plot, aes(x=Year, y=Value_bps)) + 
+  theme_bw() +
+  geom_bar(stat = "identity", fill="#9e66ab", width = 0.6) +
+  geom_text(aes(label= paste0(round(Value_bps / 1000000, digits = 2), " M")), vjust = 1.5, colour = "white") +
+  labs(title = paste0("Pillar 1 payments:", " ", district.active), x = "Year", y = "Value (£)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 16, b = 0, l = 0))) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(legend.position="none") +
+  scale_y_continuous(labels = scales::unit_format(unit = "M", scale = 1e-6))
+plot2
+print(plot2)
+
+
+#> Export the plot
+ggsave(here("Out", "P1", "District", "Plot", paste0("P1_payments_", district.active, ".png")))
+
+
+}
+
+
+
+#> Export table
+write_csv(district.summary, here("Out", "P1", "District", "CSV", paste0("P1_payments_", active_county, ".csv")))
+
+
+
+#> Wipe district.summary rows clean
+district.summary <- district.summary[0,]
+
+
+  
+}
+
+```
+<br />
+<br />
+
+## 3. Pillar 1: National Parks
+
+Pillar one reduction analysis conducted for Exmoor and Dartmoor National Parks. National Parks boundary data from Natural England Geoportal. 
+
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+
+#> Import nat parks data
+nat.parks <- st_read(here("In", "Shape", "Nat.Parks.SW.shp"), stringsAsFactors = FALSE, quiet = TRUE)
+#> Change nat parks "NAME" to Capital case
+nat.parks <- nat.parks |> 
+  mutate(NAME = str_to_title(NAME, locale = "en"))
+# glimpse(nat.parks)
+
+#> Create filter string (get names first!)
+nat.parks.list <- c("Exmoor", "Dartmoor")
+
+#> Sequential integer counter (for figure numbers)
+i <-0 
+
+#> Initiate loop
+for(active_park in nat.parks.list){
+  
+#> Loop counter (for table caption number)
+i <- i+1
+
+#> Select target county (this will be start of loop)
+park <- nat.parks|> 
+  filter(NAME == active_park)
+
+#> Select postcode district areas that intersect with active county polygon
+pcodes.int <- pcodes.gb[park,]
+#> Add area (km2) column
+pcodes.int$AreaM2 <- st_area(pcodes.int)
+#> Convert from m2 to km2
+pcodes.int$AREA_KM2_TOTAL <- pcodes.int$AreaM2 / 1000000
+pcodes.int$AREA_KM2_TOTAL <- round(pcodes.int$AREA_KM2_TOTAL, digits = 3)
+pcodes.int$AREA_KM2_TOTAL <- as.numeric(pcodes.int$AREA_KM2_TOTAL)
+#> Export data for detailed visual checking in QGIS
+#> Remove existing shapefile
+unlink(here("Out", "Tests", "pcodes.int.shp"))
+unlink(here("Out", "Tests", "pcodes.int.dbf"))
+unlink(here("Out", "Tests", "pcodes.int.prj"))
+unlink(here("Out", "Tests", "pcodes.int.shx"))
+st_write(pcodes.int, here("Out", "Tests", "pcodes.int.shp"), quiet = TRUE)
+
+
+#> Generate a layer of clipped (cookie cutter) postcodes using active county boundary
+pcodes.clip <- st_intersection(pcodes.int, park)
+#> Add area (km2) column
+pcodes.clip$AreaM2 <- st_area(pcodes.clip)
+#> Convert from m2 to km2
+pcodes.clip$AREA_KM2_CLIP<- pcodes.clip$AreaM2 / 1000000
+pcodes.clip$AREA_KM2_CLIP <- round(pcodes.clip$AREA_KM2_CLIP, digits = 3)
+pcodes.clip$AREA_KM2_CLIP <- as.numeric(pcodes.clip$AREA_KM2_CLIP)
+#> Export data for detailed visual checking in QGIS
+#> Remove existing shapefile
+unlink(here("Out", "Tests", "pcodes.clip.shp"))
+unlink(here("Out", "Tests", "pcodes.clip.dbf"))
+unlink(here("Out", "Tests", "pcodes.clip.prj"))
+unlink(here("Out", "Tests", "pcodes.clip.shx"))
+st_write(pcodes.clip, here("Out", "Tests", "pcodes.clip.shp"), quiet = TRUE)
+
+
+#> To calculate agri land differences for postcodes which straddle the boundary of target county...
+#> 1. Intersect pcodes.int with corine.agri, to calculate area of agri land for all intersecting pcode district polys (whole polygon)
+#> 2. Intersect pcodes.clip with corine.int to calculate area of agri land ony within target county polygon
+#> 3. Calculate percentage difference between the TWO sets of area calculations to gove % of agri land in each pcode district polygon
+
+
+#> 1. Intersect pcodes.int with corine.agri, to calculate area of agri land for all intersecting pcode district polys (whole polygon)
+agri.int.total <- st_intersection(pcodes.int, corine.agri)
+#> Calculate area of Corine agri land
+agri.int.total$AREA_AGRI_TOTAL <- st_area(agri.int.total)
+#> Convert from m2 to km2
+agri.int.total$AREA_AGRI_TOTAL <- agri.int.total$AREA_AGRI_TOTAL / 1000000
+agri.int.total$AREA_AGRI_TOTAL <- round(agri.int.total$AREA_AGRI_TOTAL, digits = 3)
+agri.int.total$AREA_AGRI_TOTAL <- as.numeric(agri.int.total$AREA_AGRI_TOTAL)
+#> Export data for detailed visual checking in QGIS
+#> Remove existing shapefile
+unlink(here("Out", "Tests", "agri.int.total.shp"))
+unlink(here("Out", "Tests", "agri.int.total.dbf"))
+unlink(here("Out", "Tests", "agri.int.total.prj"))
+unlink(here("Out", "Tests", "agri.int.total.shx"))
+st_write(agri.int.total, here("Out", "Tests", "agri.int.total.shp"), quiet = TRUE)
+#> Create grouped (by pcode) non-geo version of the table
+st_geometry(agri.int.total) <- NULL
+agri.int.total <- agri.int.total |> 
+  select(name, AREA_AGRI_TOTAL) |> 
+  group_by(name) |> 
+  summarise(AGRI_TOTAL = sum(AREA_AGRI_TOTAL))
+
+
+#> 2. Intersect pcodes.clip with corine.int to calculate area of agri land ony within target county polygon
+agri.int.clip <- st_intersection(pcodes.clip, corine.agri)
+#> Calculate area of Corine agri land
+agri.int.clip$AREA_AGRI_CLIP <- st_area(agri.int.clip)
+#> Convert from m2 to km2
+agri.int.clip$AREA_AGRI_CLIP <- agri.int.clip$AREA_AGRI_CLIP / 1000000
+agri.int.clip$AREA_AGRI_CLIP <- round(agri.int.clip$AREA_AGRI_CLIP, digits = 3)
+agri.int.clip$AREA_AGRI_CLIP <- as.numeric(agri.int.clip$AREA_AGRI_CLIP)
+#> Export data for detailed visual checking in QGIS
+#> Remove existing shapefile
+unlink(here("Out", "Tests", "agri.int.clip.shp"))
+unlink(here("Out", "Tests", "agri.int.clip.dbf"))
+unlink(here("Out", "Tests", "agri.int.clip.prj"))
+unlink(here("Out", "Tests", "agri.int.clip.shx"))
+st_write(agri.int.clip, here("Out", "Tests", "agri.int.clip.shp"), quiet = TRUE)
+#> Create grouped (by pcode) non-geo version of the table
+st_geometry(agri.int.clip) <- NULL
+agri.int.clip <- agri.int.clip |> 
+  select(name, AREA_AGRI_CLIP) |> 
+  group_by(name) |> 
+  summarise(AGRI_CLIP = sum(AREA_AGRI_CLIP))
+
+
+#> 3. Calculate percentage difference between the two sets of area calculations to gove % of agri land in each pcode district polygon
+#> Merge the two data frames to show size of agri area within and outside target county
+agri.merge <- merge(agri.int.total, agri.int.clip, by = "name", all.x = TRUE)
+#> Round area calcs up to 1 decimal place (to negate effect of small amounts of agri land being lost when clipped)
+agri.merge$AGRI_TOTAL <- round(agri.merge$AGRI_TOTAL, digits = 3)
+agri.merge$AGRI_CLIP <- round(agri.merge$AGRI_CLIP, digits = 2)
+#> Calculate percentage of agri land within target county 
+agri.merge$PCENT_AGRI_LAND <- agri.merge$AGRI_CLIP/ agri.merge$AGRI_TOTAL
+#> Round up
+agri.merge$PCENT_AGRI_LAND <- round(agri.merge$PCENT_AGRI_LAND, digits = 3)
+
+
+
+#> Extract postcode districts from the BPS source data ("db") which intersect with the active county polygon boundary
+#> Do this via a merge between db and pcodes.int, keeping only matching records in a new data frame
+#> Rename pcodes.in and drop geom
+pcodes.active <- pcodes.int
+st_geometry(pcodes.active) <- NULL
+BPS.merge <- merge(db, pcodes.active, by.x = "PostcodePrefix_F202B", "name", all.x = FALSE)
+#> Convert all NAs to zeros in data frame
+BPS.merge[is.na(BPS.merge)] <- 0
+
+
+
+#> BPS Calcs by year
+
+#> 2020
+#> Create table with baseline P1 (BPS + Greening) payments by postcode district for 2020 (no payments applied)
+t1.2020 <- BPS.merge %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2020_Baseline = sum(`Basic payment scheme`) + sum(`Greening: practices beneficial for climate and environment`))
+#> Check sum total of P1 for reference
+sum.original.p1 <- sum(t1.2020$P1_2020_Baseline)
+#> Merge with agri.merge data frame to append 2020 calcs and create new master table "t1"
+t1 <- merge(t1.2020, agri.merge, by.x = "PostcodePrefix_F202B", by.y = "name")
+#> #> Calculate P1 payment based on area of agri land within each postcode area
+t1$P1_2020 <- t1$P1_2020_Baseline * t1$PCENT_AGRI_LAND
+#> Round to 2 decimal places
+t1$P1_2020 <- round(t1$P1_2020, digits = 2)
+
+
+
+#> 2021
+t1.2021 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2021$P1_2020 <- t1.2021$`Basic payment scheme` + t1.2021$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2021 payments
+t1.2021 <- t1.2021 %>% 
+  mutate(P1_2021 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.95,
+                              (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.90,
+                              (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.80,
+                              P1_2020 > 150000 ~ P1_2020 * 0.75))
+# Group by postcode an summarise
+t1.2021 <- t1.2021 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2021 = sum(P1_2021))
+#> Round
+t1.2021$P1_2021 <- round(t1.2021$P1_2021, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2021, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2021 <- t1$P1_2021 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2021 <- round(t1$P1_2021, digits = 2)
+#> Check sum
+sum.p1.2021 <- sum(t1$P1_2021)
+
+
+
+#> 2022
+t1.2022 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2022$P1_2020 <- t1.2022$`Basic payment scheme` + t1.2022$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2022 payments
+t1.2022 <- t1.2022 %>% 
+   mutate(P1_2022 = case_when(P1_2020<=30000 ~ P1_2020* 0.80,
+                             (P1_2020>30000 & P1_2020<=50000) ~ P1_2020* 0.75,
+                             (P1_2020>50000 & P1_2020<=150000) ~ P1_2020* 0.65,
+                             P1_2020> 150000 ~ P1_2020* 0.60))
+# Group by postcode an summarise
+t1.2022 <- t1.2022 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2022 = sum(P1_2022))
+#> Round
+t1.2022$P1_2022 <- round(t1.2022$P1_2022, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2022, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2022 <- t1$P1_2022 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2022 <- round(t1$P1_2022, digits = 2)
+#> Check sum
+sum.p1.2022 <- sum(t1$P1_2022)
+
+
+#> 2023
+t1.2023 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2023$P1_2020 <- t1.2023$`Basic payment scheme` + t1.2023$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2023 payments
+t1.2023 <- t1.2023 %>% 
+  mutate(P1_2023 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.65,
+                             (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.60,
+                             (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.50,
+                             P1_2020 > 150000 ~ P1_2020 * 0.45))
+# Group by postcode an summarise
+t1.2023 <- t1.2023 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2023 = sum(P1_2023))
+#> Round
+t1.2023$P1_2023 <- round(t1.2023$P1_2023, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2023, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2023 <- t1$P1_2023 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2023 <- round(t1$P1_2023, digits = 2)
+#> Check sum
+sum.p1.2023 <- sum(t1$P1_2023)
+
+
+#> 2024
+t1.2024 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2024$P1_2020 <- t1.2024$`Basic payment scheme` + t1.2024$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2024 payments
+t1.2024 <- t1.2024 %>% 
+  mutate(P1_2024 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.50,
+                             (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.45,
+                             (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.35,
+                             P1_2020 > 150000 ~ P1_2020 * 0.30))
+# Group by postcode an summarise
+t1.2024 <- t1.2024 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2024 = sum(P1_2024))
+#> Round
+t1.2024$P1_2024 <- round(t1.2024$P1_2024, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2024, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2024 <- t1$P1_2024 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2024 <- round(t1$P1_2024, digits = 2)
+#> Check sum
+sum.p1.2024 <- sum(t1$P1_2024)
+
+
+#> 2025
+t1.2025 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2025$P1_2020 <- t1.2025$`Basic payment scheme` + t1.2025$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2025 payments
+t1.2025 <- t1.2025 %>% 
+ mutate(P1_2025 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.40,
+                             (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.35,
+                             (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.25,
+                             P1_2020 > 150000 ~ P1_2020 * 0.20))
+# Group by postcode an summarise
+t1.2025 <- t1.2025 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2025 = sum(P1_2025))
+#> Round
+t1.2025$P1_2025 <- round(t1.2025$P1_2025, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2025, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2025 <- t1$P1_2025 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2025 <- round(t1$P1_2025, digits = 2)
+#> Check sum
+sum.p1.2025 <- sum(t1$P1_2025)
+
+
+#> 2026
+t1.2026 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2026$P1_2020 <- t1.2026$`Basic payment scheme` + t1.2026$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2026 payments
+t1.2026 <- t1.2026 %>% 
+  mutate(P1_2026 = case_when(P1_2020 <=30000 ~ P1_2020 * 0.25,
+                             (P1_2020 >30000 & P1_2020 <=50000) ~ P1_2020 * 0.25,
+                             (P1_2020 >50000 & P1_2020 <=150000) ~ P1_2020 * 0.15,
+                             P1_2020 > 150000 ~ P1_2020 * 0.15))
+# Group by postcode an summarise
+t1.2026 <- t1.2026 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2026 = sum(P1_2026))
+#> Round
+t1.2026$P1_2026 <- round(t1.2026$P1_2026, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2026, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2026 <- t1$P1_2026 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2026 <- round(t1$P1_2026, digits = 2)
+#> Check sum
+sum.p1.2026 <- sum(t1$P1_2026)
+
+
+#> 2027
+t1.2027 <- BPS.merge %>% 
+  select(PostcodePrefix_F202B, `Basic payment scheme`, `Greening: practices beneficial for climate and environment`)
+#> Column to hold total total P1 payments (i.e. BPS + Greening) - baseline for 2020
+t1.2027$P1_2020 <- t1.2027$`Basic payment scheme` + t1.2027$`Greening: practices beneficial for climate and environment`
+#> Add new column showing 2027 payments
+t1.2027 <- t1.2027 %>% 
+   mutate(P1_2027 = case_when(P1_2020<=30000 ~ P1_2020* 0.15,
+                             (P1_2020>30000 & P1_2020<=50000) ~ P1_2020* 0.15,
+                             (P1_2020>50000 & P1_2020<=150000) ~ P1_2020* 0.10,
+                             P1_2020> 150000 ~ P1_2020* 0.10))
+# Group by postcode an summarise
+t1.2027 <- t1.2027 %>% 
+  group_by(PostcodePrefix_F202B) %>% 
+  summarise(P1_2027 = sum(P1_2027))
+#> Round
+t1.2027$P1_2027 <- round(t1.2027$P1_2027, digits = 2)
+# merge with main P1 results table (m.)
+t1 <- merge(t1, t1.2027, by.x = "PostcodePrefix_F202B", by.y = "PostcodePrefix_F202B", all.x = TRUE)
+# Change values according to agi land area proportion
+t1$P1_2027 <- t1$P1_2027 * t1$PCENT_AGRI_LAND #> Round
+t1$P1_2027 <- round(t1$P1_2027, digits = 2)
+#> Check sum
+sum.p1.2027 <- sum(t1$P1_2027)
+
+#> Convert all NAs to zeros in data frame
+t1[is.na(t1)] <- 0
+
+
+
+#> Create plot
+
+#> P1 payments by year
+p1.in <- as.data.frame(colSums(t1[6:13]))
+#> Change rownames to column "Value"
+p1.plot <- tibble::rownames_to_column(p1.in, "VALUE")
+#> Extract year from string
+p1.plot$VALUE <- sub("^.*([0-9]{4}).*", "\\1", p1.plot$VALUE)
+names(p1.plot)[1]<-paste("Year")
+names(p1.plot)[2]<-paste("Value_bps")
+
+#> Print table t1 on web page
+print(knitr::kable(t1, col.names = c("PC", "2020_Unadjusted", "Agri_Total", "Agri_In", "Agri_PC", "2020", "2021", "2022", "2023", "2024", "2025", "2026", "2027"), caption = paste0("Table 1.", i , " ", "P1 payments by National Park - ",  active_park)))
+
+#> Add line breaks
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+
+
+# Simple bar chart
+plot1 <- ggplot(p1.plot, aes(x=Year, y=Value_bps)) + 
+  theme_bw() +
+  geom_bar(stat = "identity", fill="#2c66b8", width = 0.6) +
+  geom_text(aes(label= paste0(round(Value_bps / 1000000, digits = 1), " M")), vjust = 1.5, colour = "white") +
+  labs(title = paste0("Pillar 1 payments:", " ", active_park), x = "Year", y = "Value (£)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 16, b = 0, l = 0))) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(legend.position="none") +
+  scale_y_continuous(labels = scales::unit_format(unit = "M", scale = 1e-6))
+plot1
+
+#> Add line breaks
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+cat("\n")
+
+#> Render on web page
+print(plot1)
+
+#> Export the plot
+ggsave(here("Out", "P1", "Nat_Park", "Plot", paste0("P1_payments_", active_park, ".png")))
+
+#> Export final t1 table
+write_csv(t1, here("Out", "P1", "Nat_Park", "CSV", paste0("P1_payments_", active_park, ".csv")))
+
+}
+          
+```
+
+<br />
+<br />
+
+
+## 4. Agri-Environment 
+
+<br />
+<br />
+
+
+**Methodology for AES calculations**
+
+The following datasets (ESRI shapefile format) on agri-environment payments were downloaded on 28/01/2022 from the [Natural England Open Data Geoportal](https://naturalengland-defra.opendata.arcgis.com/):
+
+- **Environmental Stewardship (ES)**: "Environmental_Stewardship_Scheme_Agreements.shp" <br />
+- **Countryside Stewardship (CS)**: "Countryside_Stewardship_Scheme_Management_Areas.shp" <br />
+
+These data differ to the P1 data in that ES and CS agreements are "point" data, which are geographically referenced using a precise x,y coordinate. Each point represents the geographical centre of each ES/CS agreement. This means that extracting agreements which fall within a specific boundary is more straightforward then with the P1 data - which is aggregated to postcode districts. The basic steps of the workflow as follows:<br />
+- **Step 1**: Initiate a programming loop based on the target boundaries (i.e. counties, national parks) <br />
+- **Step 2**: Clip AES data layer to the geographical extent of the target boundary  <br />
+- **Step 3**: For each boundary area, calculate the total AES payments for each year represented in the data layer. Note, the approaches for calculating annual totals ES and CS differ due to the structural differences of the datasets. This is quite complex and is fully documented in the R code.<br />
+- **Step 4**: Display output tables and bar plots  <br />
+- **Step 5**: Export output tables and bar plots to CCRI shared drive  <br />
+<br />
+<br />
+<br />
+
+
+### 4.1 ES - County-level
+
+County-level analysis of Environmental Stewardship (ES) payments. 
+
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+
+#> Get ES data
+#> This dataset has been extracted from the latest 914/02/2022) CS data for England
+#> The pole of inaccessibility for each ES polygon has been pre-computed in QGIS, and the points then clipped to the extent of the SW LEP to reduce processing overheads
+ES <- st_read(here("In", "Shape", "AES", "ES_SouthWest_PoI.shp"), stringsAsFactors = FALSE, quiet = TRUE)
+
+i <- 0
+#> Initiate loop
+for(active_county in counties){
+  
+#> Loop counter (for table caption number)
+i <- i+1
+
+#> Get a boundary shapefile for the active county
+target_county <- counties.sw |>
+  filter(NAME == active_county)
+
+
+# #> Test county polygon (Cornwall) - need to automate for all counties - then districts
+# test.county <- cornwall.sf
+
+#> Intersect with target county polygon
+int <- st_intersection(ES, target_county)
+
+#> Create non-geom version 
+ES.ng <- int
+st_geometry(ES.ng) <- NULL
+
+#> Filter records to get ones that were live in 2020
+#> New start date field in date format
+ES.ng$STARTDAT.2 <- as.Date(ES.ng$STARTDAT, format = "%d/%m/%Y") # correct lowercase y
+#> New start date field in date format
+ES.ng$ENDDATE.2 <- as.Date(ES.ng$ENDDATE, format = "%d/%m/%Y") # correct lowercase y
+
+#> Create column for length of agreement in years
+ES.ng$Years <- as.numeric(ES.ng$ENDDATE.2 - ES.ng$STARTDAT.2) / 365
+ES.ng$Years <- round(ES.ng$Years, 0)
+ES.ng$TOTCOST <- as.numeric(ES.ng$TOTCOST)
+
+#> Create column for average cost
+ES.ng$AV.YEAR.COST <- ES.ng$TOTCOST / ES.ng$Years
+#> Change NAs to Zero
+ES.ng$AV.YEAR.COST[is.na(ES.ng$AV.YEAR.COST)] <- 0
+
+#> Export as CSV
+write_csv(ES.ng, here("Out", "AES", "ES", "County", paste0("ES_Agreements_", active_county, ".csv")))
+
+
+#> 2018 and 2019 baseline
+#> Calculate the "baseline" for agreements live in 2018 - earliest end date is "2020-04-30" - so all records will be included
+live.2018 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(STARTDAT.2 <= "2017-12-31", ENDDATE.2 <= "2040-12-31")   
+#> Sum Av cost for annual total for 2018
+x.2018 <- sum(live.2018$AV.YEAR.COST)
+x.2019 <- sum(live.2018$AV.YEAR.COST)  #2019 is the same - as same number of live agreements running throughout 2019-2018
+#> Create new dataframe to hold this
+totals <- c(x.2018, x.2019)
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0)))
+#> Add figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+
+
+#> Work out 2020 totals
+#> Filter for agreements ending in 2020
+end.2020 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(STARTDAT.2 <= "2017-12-31", ENDDATE.2 <= "2020-12-31")
+#> Work out how many days in year that agreement running for
+end.2020$YearStart <- as.Date("2020-01-01")
+end.2020$Days <- as.numeric(end.2020$ENDDATE.2 - end.2020$YearStart)
+#> Work out proportion of year agreement is active
+end.2020$Year_Prop <- end.2020$Days / 365
+#> New column for cost of 2020 based on proportion
+end.2020$Cost_Actual <- end.2020$Year_Prop * end.2020$AV.YEAR.COST
+#> Total amount for agreements ending in 2020
+tot.2020 <- sum(end.2020$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2020
+x.2020 <- x.2018 - tot.2020
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+
+
+#> Work out 2021 totals
+#> Filter for agreements ending in 2021
+end.2021 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(ENDDATE.2  >= "2021-01-01", ENDDATE.2 <= "2021-12-31")
+#> Work out how many days in year that agreement running for
+end.2021$YearStart <- as.Date("2021-01-01")
+end.2021$Days <- as.numeric(end.2021$ENDDATE.2 - end.2021$YearStart)
+#> Work out proportion of year agreement is active
+end.2021$Year_Prop <- end.2021$Days / 365
+#> New column for cost of 2021 based on proportion
+end.2021$Cost_Actual <- end.2021$Year_Prop * end.2021$AV.YEAR.COST
+#> Total amount for agreements ending in 2021
+tot.2021 <- sum(end.2021$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2020
+x.2021 <- x.2018 - (tot.2020 + tot.2021)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021)
+#> Insert figure for 2021
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+
+
+#> Work out 2022 totals
+#> Filter for agreements ending in 2022
+end.2022 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(ENDDATE.2  >= "2022-01-01", ENDDATE.2 <= "2022-12-31")
+#> Work out how mnay days in year that agreement running for
+end.2022$YearStart <- as.Date("2022-01-01")
+end.2022$Days <- as.numeric(end.2022$ENDDATE.2 - end.2022$YearStart)
+#> Work out proipertion of year agreement is active
+end.2022$Year_Prop <- end.2022$Days / 365
+#> New column for cost of 2021 based on proportion
+end.2022$Cost_Actual <- end.2022$Year_Prop * end.2022$AV.YEAR.COST
+#> Total amount for agreements ending in 2021
+tot.2022 <- sum(end.2022$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2022  <- x.2018 - (tot.2021 + tot.2020 + tot.2022)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+
+#> Work out 2023 totals
+#> Filter for agreements ending in 2023
+end.2023 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(ENDDATE.2  >= "2023-01-01", ENDDATE.2 <= "2023-12-31")
+#> Work out how mnay days in year that agreement running for
+end.2023$YearStart <- as.Date("2023-01-01")
+end.2023$Days <- as.numeric(end.2023$ENDDATE.2 - end.2023$YearStart)
+#> Work out proipertion of year agreement is active
+end.2023$Year_Prop <- end.2023$Days / 365
+#> New column for cost of 2021 based on proportion
+end.2023$Cost_Actual <- end.2023$Year_Prop * end.2023$AV.YEAR.COST
+#> Total amount for agreements ending in 2021
+tot.2023 <- sum(end.2023$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2023  <- x.2018 - (tot.2021 + tot.2020 + tot.2022 + tot.2023)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022, x.2023)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+
+#> Work out 2024 totals
+#> Filter for agreements ending in 2024
+end.2024 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(ENDDATE.2  >= "2024-01-01", ENDDATE.2 <= "2024-12-31")
+#> Work out how mnay days in year that agreement running for
+end.2024$YearStart <- as.Date("2024-01-01")
+end.2024$Days <- as.numeric(end.2024$ENDDATE.2 - end.2024$YearStart)
+#> Work out proipertion of year agreement is active
+end.2024$Year_Prop <- end.2024$Days / 365
+#> New column for cost of 2021 based on proportion
+end.2024$Cost_Actual <- end.2024$Year_Prop * end.2024$AV.YEAR.COST
+#> Total amount for agreements ending in 2021
+tot.2024 <- sum(end.2024$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2024  <- x.2018 - (tot.2021 + tot.2020 + tot.2022 + tot.2023 + tot.2024)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0), Total_2024 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022, x.2023, x.2024)
+#> Insert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+
+# Export ES payments summary table
+write_csv(df, here("Out", "AES", "ES", "County", "CSV", paste0("ES_payments_Summary_", active_county, ".csv")))
+
+#> Print table district.summary on web page
+print(knitr::kable(df, caption = paste0("Table 4.1.", i , " ", "ES payments - ",  active_county)))
+
+
+#> Plot data as bar chart
+#> Make long
+df.plot <- melt(df)
+#> Extract year from string
+names(df.plot)[1]<-paste("Year")
+names(df.plot)[2]<-paste("Value_es")
+df.plot$Year <- sub("^.*([0-9]{4}).*", "\\1", df.plot$Year)
+
+# Simple bar chart
+plot.es <- ggplot(df.plot, aes(x=Year, y=Value_es)) + 
+  geom_bar(stat = "identity", fill="#b3a96fff", width = 0.6) +
+  theme_bw() +
+  labs(title = paste0("Environmental Stewardship payments: ", active_county), x = "Year", y = "Value (£)") +
+  geom_text(aes(label= paste0(round(Value_es / 1000000, digits = 2), " M")), vjust = 1.5, colour = "white") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 16, b = 0, l = 0))) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(legend.position="none") +
+  scale_y_continuous(labels = unit_format(unit = "M", scale = 1e-6))
+plot.es
+print(plot.es)
+#> Export the plot
+ggsave(here("Out", "AES", "ES", "County", "Plot", paste0("ES_payments_", active_county, ".png")), width = 7, height = 5)
+
+
+#> Render table on web page
+
+
+
+}
+
+
+
+```
+
+
+
+### 4.2 ES - District-level
+
+
+District-level analysis of Environmental Stewardship (ES) payments. Methods overview to follow. 
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+
+#> Get ES data
+#> This dataset has been extracted from the latest 914/02/2022) CS data for England
+#> The pole of inaccessibility for each ES polygon has been pre-computed in QGIS, and the points then clipped to the extent of the SW LEP to reduce processing overheads
+ES <- st_read(here("In", "Shape", "AES", "ES_SouthWest_PoI.shp"), stringsAsFactors = FALSE, quiet = TRUE)
+
+#> Get district boundary data for SW counties
+districts.sw <- st_read(here("In", "Shape", "Districts.SW.UPDATED.2.shp"), quiet = TRUE)
+
+#? Remove string "(B)" from district names
+# # districts.sw$NAME <- str_remove_all(districts.sw$NAME, "(B)")
+districts.sw$NAME<- gsub("\\s*\\([^\\)]+\\)", "", districts.sw$NAME)
+#> Trim WS
+districts.sw$NAME<- trimws(districts.sw$NAME)
+# glimpse(districts.sw)
+  
+#> Create list for loop
+districts.list <- as.list(districts.sw$NAME)
+
+i <- 0
+#> Initiate loop
+for(active_district in districts.list){
+
+#> Loop counter (for table caption number)
+i <- i+1
+
+#> Get a boundary shapefile for the active county
+target_district <- districts.sw |>
+  filter(NAME == active_district)
+
+
+# #> Test county polygon (Cornwall) - need to automate for all counties - then districts
+# test.county <- cornwall.sf
+
+#> Intersect with target county polygon
+int <- st_intersection(ES, target_district)
+
+#> Create non-geom version 
+ES.ng <- int
+st_geometry(ES.ng) <- NULL
+
+#> Filter records to get ones that were live in 2020
+#> New start date field in date format
+ES.ng$STARTDAT.2 <- as.Date(ES.ng$STARTDAT, format = "%d/%m/%Y") # correct lowercase y
+#> New start date field in date format
+ES.ng$ENDDATE.2 <- as.Date(ES.ng$ENDDATE, format = "%d/%m/%Y") # correct lowercase y
+
+#> Create column for length of agreement in years
+ES.ng$Years <- as.numeric(ES.ng$ENDDATE.2 - ES.ng$STARTDAT.2) / 365
+ES.ng$Years <- round(ES.ng$Years, 0)
+ES.ng$TOTCOST <- as.numeric(ES.ng$TOTCOST)
+
+#> Create column for average cost
+ES.ng$AV.YEAR.COST <- ES.ng$TOTCOST / ES.ng$Years
+#> Change NAs to Zero
+ES.ng$AV.YEAR.COST[is.na(ES.ng$AV.YEAR.COST)] <- 0
+
+#> Export as CSV
+write_csv(ES.ng, here("Out", "AES", "ES", "District", "CSV", paste0("ES_Agreements_", active_district, ".csv")))
+
+
+#> 2018 and 2019 baseline
+#> Calculate the "baseline" for agreements live in 2018 - earliest end date is "2020-04-30" - so all records will be included
+live.2018 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(STARTDAT.2 <= "2017-12-31", ENDDATE.2 <= "2040-12-31")   
+#> Sum Av cost for annual total for 2018
+x.2018 <- sum(live.2018$AV.YEAR.COST)
+x.2019 <- sum(live.2018$AV.YEAR.COST)  #2019 is the same - as same number of live agreements running throughout 2019-2018
+#> Create new dataframe to hold this
+totals <- c(x.2018, x.2019)
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0)))
+#> Add figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+
+
+#> Work out 2020 totals
+#> Filter for agreements ending in 2020
+end.2020 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(STARTDAT.2 <= "2017-12-31", ENDDATE.2 <= "2020-12-31")
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(end.2020)[1] != 0) {
+#> Work out how many days in year that agreement running for
+end.2020$YearStart <- as.Date("2020-01-01")
+end.2020$Days <- as.numeric(end.2020$ENDDATE.2 - end.2020$YearStart)
+#> Work out proportion of year agreement is active
+end.2020$Year_Prop <- end.2020$Days / 365
+#> New column for cost of 2020 based on proportion
+end.2020$Cost_Actual <- end.2020$Year_Prop * end.2020$AV.YEAR.COST
+#> Total amount for agreements ending in 2020
+tot.2020 <- sum(end.2020$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2020
+x.2020 <- x.2018 - tot.2020
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+} else {
+  
+tot.2020 = 0
+#> Subtract from 2018 baseline total to calculate final total for 2020
+x.2020 <- x.2018 - tot.2020
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+}
+
+
+
+
+
+#> Work out 2021 totals
+#> Filter for agreements ending in 2021
+end.2021 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(ENDDATE.2  >= "2021-01-01", ENDDATE.2 <= "2021-12-31")
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(end.2021)[1] != 0) {
+#> Work out how many days in year that agreement running for
+end.2021$YearStart <- as.Date("2021-01-01")
+end.2021$Days <- as.numeric(end.2021$ENDDATE.2 - end.2021$YearStart)
+#> Work out proportion of year agreement is active
+end.2021$Year_Prop <- end.2021$Days / 365
+#> New column for cost of 2021 based on proportion
+end.2021$Cost_Actual <- end.2021$Year_Prop * end.2021$AV.YEAR.COST
+#> Total amount for agreements ending in 2021
+tot.2021 <- sum(end.2021$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2020
+x.2021 <- x.2018 - (tot.2020 + tot.2021)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021)
+#> Insert figure for 2021
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+} else {
+  
+end.2021 = 0
+#> Subtract from 2018 baseline total to calculate final total for 2020
+x.2021 <- x.2018 - (tot.2020 + tot.2021)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021)
+#> Insert figure for 2021
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+}
+
+
+#> Work out 2022 totals
+#> Filter for agreements ending in 2022
+end.2022 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(ENDDATE.2  >= "2022-01-01", ENDDATE.2 <= "2022-12-31")
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(end.2022)[1] != 0) {
+#> Work out how mnay days in year that agreement running for
+end.2022$YearStart <- as.Date("2022-01-01")
+end.2022$Days <- as.numeric(end.2022$ENDDATE.2 - end.2022$YearStart)
+#> Work out proipertion of year agreement is active
+end.2022$Year_Prop <- end.2022$Days / 365
+#> New column for cost of 2021 based on proportion
+end.2022$Cost_Actual <- end.2022$Year_Prop * end.2022$AV.YEAR.COST
+#> Total amount for agreements ending in 2021
+tot.2022 <- sum(end.2022$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2022  <- x.2018 - (tot.2021 + tot.2020 + tot.2022)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+} else {
+end.2022 = 0
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2022  <- x.2018 - (tot.2021 + tot.2020 + tot.2022)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+}
+
+
+
+#> Work out 2023 totals
+#> Filter for agreements ending in 2023
+end.2023 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(ENDDATE.2  >= "2023-01-01", ENDDATE.2 <= "2023-12-31")
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(end.2023)[1] != 0) {
+#> Work out how mnay days in year that agreement running for
+end.2023$YearStart <- as.Date("2023-01-01")
+end.2023$Days <- as.numeric(end.2023$ENDDATE.2 - end.2023$YearStart)
+#> Work out proipertion of year agreement is active
+end.2023$Year_Prop <- end.2023$Days / 365
+#> New column for cost of 2021 based on proportion
+end.2023$Cost_Actual <- end.2023$Year_Prop * end.2023$AV.YEAR.COST
+#> Total amount for agreements ending in 2021
+tot.2023 <- sum(end.2023$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2023  <- x.2018 - (tot.2021 + tot.2020 + tot.2022 + tot.2023)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022, x.2023)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+} else {
+  
+end.2023 = 0
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2023  <- x.2018 - (tot.2021 + tot.2020 + tot.2022 + tot.2023)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022, x.2023)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+}
+
+
+#> Work out 2024 totals
+#> Filter for agreements ending in 2024
+end.2024 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(ENDDATE.2  >= "2024-01-01", ENDDATE.2 <= "2024-12-31")
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(end.2024)[1] != 0) {
+#> Work out how mnay days in year that agreement running for
+end.2024$YearStart <- as.Date("2024-01-01")
+end.2024$Days <- as.numeric(end.2024$ENDDATE.2 - end.2024$YearStart)
+#> Work out proipertion of year agreement is active
+end.2024$Year_Prop <- end.2024$Days / 365
+#> New column for cost of 2021 based on proportion
+end.2024$Cost_Actual <- end.2024$Year_Prop * end.2024$AV.YEAR.COST
+#> Total amount for agreements ending in 2021
+tot.2024 <- sum(end.2024$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2024  <- x.2018 - (tot.2021 + tot.2020 + tot.2022 + tot.2023 + tot.2024)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0), Total_2024 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022, x.2023, x.2024)
+#> Insert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+} else {
+  
+end.2024 = 0
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2024  <- x.2018 - (tot.2021 + tot.2020 + tot.2022 + tot.2023 + tot.2024)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0), Total_2024 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022, x.2023, x.2024)
+
+}
+
+
+#> If there are any negative values in df, convert these to zero
+df[df <0] <- 0
+
+
+
+# Export ES payments summary table
+write_csv(df, here("Out", "AES", "ES", "District", "CSV", paste0("ES_payments_Summary_", active_district, ".csv")))
+
+#> Print table district.summary on web page
+print(knitr::kable(df, caption = paste0("Table 4.2.", i , " ", "ES payments - ",  active_district)))
+
+
+#> Plot data as bar chart
+#> Make long
+df.plot <- melt(df)
+#> Extract year from string
+names(df.plot)[1]<-paste("Year")
+names(df.plot)[2]<-paste("Value_es")
+df.plot$Year <- sub("^.*([0-9]{4}).*", "\\1", df.plot$Year)
+
+# Simple bar chart
+plot.es <- ggplot(df.plot, aes(x=Year, y=Value_es)) + 
+  geom_bar(stat = "identity", fill="#b3a96fff", width = 0.6) +
+  theme_bw() +
+  labs(title = paste0("Environmental Stewardship payments: ", active_district), x = "Year", y = "Value (£)") +
+  geom_text(aes(label= paste0(round(Value_es / 1000000, digits = 2), " M")), vjust = 1.5, colour = "white") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 16, b = 0, l = 0))) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(legend.position="none") +
+  scale_y_continuous(labels = unit_format(unit = "M", scale = 1e-6))
+plot.es
+print(plot.es)
+#> Export the plot
+ggsave(here("Out", "AES", "ES", "District", "Plot", paste0("ES_payments_", active_district, ".png")), width = 7, height = 5)
+
+
+
+
+}
+
+
+
+```
+
+
+### 4.3 ES - National Parks
+
+
+National Park-level analysis of Environmental Stewardship (ES) payments. Methods overview to follow. 
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+
+#> Get ES data
+#> This dataset has been extracted from the latest 914/02/2022) CS data for England
+#> The pole of inaccessibility for each ES polygon has been pre-computed in QGIS, and the points then clipped to the extent of the SW LEP to reduce processing overheads
+ES <- st_read(here("In", "Shape", "AES", "ES_SouthWest_PoI.shp"), stringsAsFactors = FALSE, quiet = TRUE)
+
+#> Create filter string (get names first!)
+nat.parks.list <- c("Exmoor", "Dartmoor")
+
+#> Sequential integer counter (for figure numbers)
+i <-0 
+
+#> Initiate loop
+for(active_park in nat.parks.list){
+  
+#> Loop counter (for table caption number)
+i <- i+1
+
+#> Select target county (this will be start of loop)
+target_park <- nat.parks|> 
+  filter(NAME == active_park)
+
+# #> Test county polygon (Cornwall) - need to automate for all counties - then districts
+# test.county <- cornwall.sf
+
+#> Intersect with target county polygon
+int <- st_intersection(ES, target_park)
+
+#> Create non-geom version 
+ES.ng <- int
+st_geometry(ES.ng) <- NULL
+
+#> Filter records to get ones that were live in 2020
+#> New start date field in date format
+ES.ng$STARTDAT.2 <- as.Date(ES.ng$STARTDAT, format = "%d/%m/%Y") # correct lowercase y
+#> New start date field in date format
+ES.ng$ENDDATE.2 <- as.Date(ES.ng$ENDDATE, format = "%d/%m/%Y") # correct lowercase y
+
+#> Create column for length of agreement in years
+ES.ng$Years <- as.numeric(ES.ng$ENDDATE.2 - ES.ng$STARTDAT.2) / 365
+ES.ng$Years <- round(ES.ng$Years, 0)
+ES.ng$TOTCOST <- as.numeric(ES.ng$TOTCOST)
+
+#> Create column for average cost
+ES.ng$AV.YEAR.COST <- ES.ng$TOTCOST / ES.ng$Years
+#> Change NAs to Zero
+ES.ng$AV.YEAR.COST[is.na(ES.ng$AV.YEAR.COST)] <- 0
+
+#> Export as CSV
+write_csv(ES.ng, here("Out", "AES", "ES", "Nat_Park", "CSV", paste0("ES_Agreements_", active_park, ".csv")))
+
+
+#> 2018 and 2019 baseline
+#> Calculate the "baseline" for agreements live in 2018 - earliest end date is "2020-04-30" - so all records will be included
+live.2018 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(STARTDAT.2 <= "2017-12-31", ENDDATE.2 <= "2040-12-31")   
+#> Sum Av cost for annual total for 2018
+x.2018 <- sum(live.2018$AV.YEAR.COST)
+x.2019 <- sum(live.2018$AV.YEAR.COST)  #2019 is the same - as same number of live agreements running throughout 2019-2018
+#> Create new dataframe to hold this
+totals <- c(x.2018, x.2019)
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0)))
+#> Add figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+
+
+#> Work out 2020 totals
+#> Filter for agreements ending in 2020
+end.2020 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(STARTDAT.2 <= "2017-12-31", ENDDATE.2 <= "2020-12-31")
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(end.2020)[1] != 0) {
+#> Work out how many days in year that agreement running for
+end.2020$YearStart <- as.Date("2020-01-01")
+end.2020$Days <- as.numeric(end.2020$ENDDATE.2 - end.2020$YearStart)
+#> Work out proportion of year agreement is active
+end.2020$Year_Prop <- end.2020$Days / 365
+#> New column for cost of 2020 based on proportion
+end.2020$Cost_Actual <- end.2020$Year_Prop * end.2020$AV.YEAR.COST
+#> Total amount for agreements ending in 2020
+tot.2020 <- sum(end.2020$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2020
+x.2020 <- x.2018 - tot.2020
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+} else {
+  
+tot.2020 = 0
+#> Subtract from 2018 baseline total to calculate final total for 2020
+x.2020 <- x.2018 - tot.2020
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+}
+
+
+
+
+
+#> Work out 2021 totals
+#> Filter for agreements ending in 2021
+end.2021 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(ENDDATE.2  >= "2021-01-01", ENDDATE.2 <= "2021-12-31")
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(end.2021)[1] != 0) {
+#> Work out how many days in year that agreement running for
+end.2021$YearStart <- as.Date("2021-01-01")
+end.2021$Days <- as.numeric(end.2021$ENDDATE.2 - end.2021$YearStart)
+#> Work out proportion of year agreement is active
+end.2021$Year_Prop <- end.2021$Days / 365
+#> New column for cost of 2021 based on proportion
+end.2021$Cost_Actual <- end.2021$Year_Prop * end.2021$AV.YEAR.COST
+#> Total amount for agreements ending in 2021
+tot.2021 <- sum(end.2021$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2020
+x.2021 <- x.2018 - (tot.2020 + tot.2021)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021)
+#> Insert figure for 2021
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+} else {
+  
+end.2021 = 0
+#> Subtract from 2018 baseline total to calculate final total for 2020
+x.2021 <- x.2018 - (tot.2020 + tot.2021)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021)
+#> Insert figure for 2021
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+}
+
+
+#> Work out 2022 totals
+#> Filter for agreements ending in 2022
+end.2022 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(ENDDATE.2  >= "2022-01-01", ENDDATE.2 <= "2022-12-31")
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(end.2022)[1] != 0) {
+#> Work out how mnay days in year that agreement running for
+end.2022$YearStart <- as.Date("2022-01-01")
+end.2022$Days <- as.numeric(end.2022$ENDDATE.2 - end.2022$YearStart)
+#> Work out proipertion of year agreement is active
+end.2022$Year_Prop <- end.2022$Days / 365
+#> New column for cost of 2021 based on proportion
+end.2022$Cost_Actual <- end.2022$Year_Prop * end.2022$AV.YEAR.COST
+#> Total amount for agreements ending in 2021
+tot.2022 <- sum(end.2022$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2022  <- x.2018 - (tot.2021 + tot.2020 + tot.2022)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+} else {
+end.2022 = 0
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2022  <- x.2018 - (tot.2021 + tot.2020 + tot.2022)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+
+}
+
+
+
+#> Work out 2023 totals
+#> Filter for agreements ending in 2023
+end.2023 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(ENDDATE.2  >= "2023-01-01", ENDDATE.2 <= "2023-12-31")
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(end.2023)[1] != 0) {
+#> Work out how mnay days in year that agreement running for
+end.2023$YearStart <- as.Date("2023-01-01")
+end.2023$Days <- as.numeric(end.2023$ENDDATE.2 - end.2023$YearStart)
+#> Work out proipertion of year agreement is active
+end.2023$Year_Prop <- end.2023$Days / 365
+#> New column for cost of 2021 based on proportion
+end.2023$Cost_Actual <- end.2023$Year_Prop * end.2023$AV.YEAR.COST
+#> Total amount for agreements ending in 2021
+tot.2023 <- sum(end.2023$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2023  <- x.2018 - (tot.2021 + tot.2020 + tot.2022 + tot.2023)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022, x.2023)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+} else {
+  
+end.2023 = 0
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2023  <- x.2018 - (tot.2021 + tot.2020 + tot.2022 + tot.2023)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022, x.2023)
+#> AInsert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+}
+
+
+#> Work out 2024 totals
+#> Filter for agreements ending in 2024
+end.2024 <- ES.ng %>%
+  select(AGREF, TOTCOST, Years, AV.YEAR.COST, STARTDAT.2, ENDDATE.2, Years) %>% 
+  filter(ENDDATE.2  >= "2024-01-01", ENDDATE.2 <= "2024-12-31")
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(end.2024)[1] != 0) {
+#> Work out how mnay days in year that agreement running for
+end.2024$YearStart <- as.Date("2024-01-01")
+end.2024$Days <- as.numeric(end.2024$ENDDATE.2 - end.2024$YearStart)
+#> Work out proipertion of year agreement is active
+end.2024$Year_Prop <- end.2024$Days / 365
+#> New column for cost of 2021 based on proportion
+end.2024$Cost_Actual <- end.2024$Year_Prop * end.2024$AV.YEAR.COST
+#> Total amount for agreements ending in 2021
+tot.2024 <- sum(end.2024$Cost_Actual)
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2024  <- x.2018 - (tot.2021 + tot.2020 + tot.2022 + tot.2023 + tot.2024)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0), Total_2024 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022, x.2023, x.2024)
+#> Insert figure for 2018
+df <- miscTools::insertRow(ES_Summary, 1, totals)
+df <- as.data.frame(df)
+} else {
+  
+end.2024 = 0
+#> Subtract from 2018 baseline total to calculate final total for 2021
+x.2024  <- x.2018 - (tot.2021 + tot.2020 + tot.2022 + tot.2023 + tot.2024)
+#> Update df
+ES_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0), Total_2024 = numeric(0)))
+totals <- c(x.2018, x.2019, x.2020, x.2021, x.2022, x.2023, x.2024)
+
+}
+
+
+# Export ES payments summary table
+write_csv(df, here("Out", "AES", "ES", "Nat_Park", "CSV", paste0("ES_payments_Summary_", active_park, ".csv")))
+
+#> Print table district.summary on web page
+print(knitr::kable(df, caption = paste0("Table 4.3.", i , " ", "ES payments - ",  active_park)))
+
+
+#> Plot data as bar chart
+#> Make long
+df.plot <- melt(df)
+#> Extract year from string
+names(df.plot)[1]<-paste("Year")
+names(df.plot)[2]<-paste("Value_es")
+df.plot$Year <- sub("^.*([0-9]{4}).*", "\\1", df.plot$Year)
+
+# Simple bar chart
+plot.es <- ggplot(df.plot, aes(x=Year, y=Value_es)) + 
+  geom_bar(stat = "identity", fill="#b3a96fff", width = 0.6) +
+  theme_bw() +
+  labs(title = paste0("Environmental Stewardship payments: ", active_park), x = "Year", y = "Value (£)") +
+  geom_text(aes(label= paste0(round(Value_es / 1000000, digits = 2), " M")), vjust = 1.5, colour = "white") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 16, b = 0, l = 0))) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(legend.position="none") +
+  scale_y_continuous(labels = unit_format(unit = "M", scale = 1e-6))
+plot.es
+print(plot.es)
+#> Export the plot
+ggsave(here("Out", "AES", "ES", "Nat_Park", "Plot", paste0("ES_payments_", active_park, ".png")), width = 7, height = 5)
+
+
+
+
+}
+
+
+```
+
+
+
+
+### 4.4 CS - County-level
+
+
+County-level analysis of Countryside Stewardship (CS) payments. Methods overview to follow. 
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+
+
+#> Get data
+CS <- st_read(here("In", "Shape", "AES", "CS_SouthWest_PoI.shp"), stringsAsFactors = FALSE, quiet = TRUE)
+
+#> Initiate counter (for figure numbers)
+i <- 0
+#> Initiate loop
+for(active_county in counties){
+#> Loop counter (for table caption number)
+i <- i+1
+#> Get a boundary shapefile for the active county
+target_county <- counties.sw |>
+filter(NAME == active_county)
+
+# #> TESTING - one county at a time
+# target_county <- counties.gb |>
+#   filter(NAME == "Dorset")
+
+
+#> Intersect with target county polygon
+int <- st_intersection(CS, target_county)
+
+#> Rename intersected data
+CS.ng <- int
+
+#> New start date field in date format
+CS.ng$STARTDATE.2 <- lubridate::dmy_hms(CS.ng$STARTDATE) 
+#> New end date field in date format
+CS.ng$ENDDATE.2 <- lubridate::dmy_hms(CS.ng$ENDDATE) 
+#> Format dates
+CS.ng$STARTDATE.2 <- as.Date(CS.ng$STARTDATE.2, format = "%d/%m/%Y")
+CS.ng$ENDDATE.2 <- as.Date(CS.ng$ENDDATE.2, format = "%d/%m/%Y")
+
+#> Create a column to get number of years
+CS.ng$Years <- as.numeric(CS.ng$ENDDATE.2 - CS.ng$STARTDATE.2)
+CS.ng$Years <- CS.ng$Years /365
+CS.ng$Years <- round(CS.ng$Years, 0)
+#> List of agreement duration in years - unique durations
+years.unique <- unique(CS.ng$Years)
+
+# #> Export table for team use
+# write_csv(CS.ng, here("Out", "AES", "CS", "County", "CSV", paste0("CS_Agreements_", active_county, ".csv")))
+
+
+#> Export table for team use
+write_csv(CS.ng, here("Out", "AES", "CS", "County", "CSV", paste0("CS_Agreements_", active_county, "Test.csv")))
+
+
+#Create individual year columns to assign agreements to different years based on start date and duration - code for that to follow below
+CS.ng$y.2016 <- 0
+CS.ng$y.2017 <- 0 
+CS.ng$y.2018 <- 0
+CS.ng$y.2019 <- 0
+CS.ng$y.2020 <- 0
+CS.ng$y.2021 <- 0
+CS.ng$y.2022 <- 0
+CS.ng$y.2023 <- 0
+CS.ng$y.2024 <- 0
+
+#> Get unique combinations of agreements-years
+unique.agree2 <- count(CS.ng, STARTDATE.2, Years) %>% 
+  ungroup()
+#> Export
+write_csv(unique.agree2, (here("Out", "AES", "CS", "CS_Unique_Agree-Year_for_checking.csv")))
+
+
+#> 1. Agreements starting in 2016 running for 10 years
+cs.2016.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2016-01-01") & STARTDATE.2 <= as.Date("2016-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2016.10)[1] != 0) {
+#> Update relevant cols
+cs.2016.10$y.2016 = 1
+cs.2016.10$y.2017 = 1
+cs.2016.10$y.2018 = 1
+cs.2016.10$y.2019 = 1
+cs.2016.10$y.2020 = 1
+cs.2016.10$y.2021 = 1
+cs.2016.10$y.2022 = 1
+cs.2016.10$y.2023 = 1
+cs.2016.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2016[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2016
+CS.ng$y.2017[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2017
+CS.ng$y.2018[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2018
+CS.ng$y.2019[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2019
+CS.ng$y.2020[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2020
+CS.ng$y.2021[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2021
+CS.ng$y.2022[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2022
+CS.ng$y.2023[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2023
+CS.ng$y.2024[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2024
+}
+
+
+#> 2. Agreements starting in 2017 running for 10 years
+cs.2017.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2017-01-01") & STARTDATE.2 <= as.Date("2017-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2017.10)[1] != 0) {
+#> Update relevant cols
+cs.2017.10$y.2017 = 1
+cs.2017.10$y.2018 = 1
+cs.2017.10$y.2019 = 1
+cs.2017.10$y.2020 = 1
+cs.2017.10$y.2021 = 1
+cs.2017.10$y.2022 = 1
+cs.2017.10$y.2023 = 1
+cs.2017.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2017[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2017
+CS.ng$y.2018[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2018
+CS.ng$y.2019[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2019
+CS.ng$y.2020[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2020
+CS.ng$y.2021[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2021
+CS.ng$y.2022[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2022
+CS.ng$y.2023[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2023
+CS.ng$y.2024[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2024
+}
+
+
+
+#> 3. Agreements starting in 2018 running for 5 years 
+cs.2018.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2018-01-01") & STARTDATE.2 <= as.Date("2018-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2018.5)[1] != 0) {
+#> Update relevant cols
+cs.2018.5$y.2018 = 1
+cs.2018.5$y.2019 = 1
+cs.2018.5$y.2020 = 1
+cs.2018.5$y.2021 = 1
+cs.2018.5$y.2022 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2018[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2018
+CS.ng$y.2019[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2019
+CS.ng$y.2020[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2020
+CS.ng$y.2021[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2021
+CS.ng$y.2022[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2022
+}
+
+
+
+#> 4. Agreements starting in 2018 running for 10 years 
+cs.2018.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2018-01-01") & STARTDATE.2 <= as.Date("2018-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2018.10)[1] != 0) {
+#> Update relevant cols
+cs.2018.10$y.2018 = 1
+cs.2018.10$y.2019 = 1
+cs.2018.10$y.2020 = 1
+cs.2018.10$y.2021 = 1
+cs.2018.10$y.2022 = 1
+cs.2018.10$y.2023 = 1
+cs.2018.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2018[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2018
+CS.ng$y.2019[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2019
+CS.ng$y.2020[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2020
+CS.ng$y.2021[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2021
+CS.ng$y.2022[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2022
+CS.ng$y.2023[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2023
+CS.ng$y.2024[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2024
+}
+
+
+
+#> 5. Agreements starting in 2019 running for 5 years 
+cs.2019.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2019-01-01") & STARTDATE.2 <= as.Date("2019-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2019.5)[1] != 0) {
+#> Update relevant cols
+cs.2019.5$y.2019 = 1
+cs.2019.5$y.2020 = 1
+cs.2019.5$y.2021 = 1
+cs.2019.5$y.2022 = 1
+cs.2019.5$y.2023 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2019[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2019
+CS.ng$y.2020[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2020
+CS.ng$y.2021[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2021
+CS.ng$y.2022[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2022
+CS.ng$y.2023[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2023
+}
+
+
+
+#> 6. Agreements starting in 2019 running for 10 years 
+cs.2019.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2019-01-01") & STARTDATE.2 <= as.Date("2019-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2019.10)[1] != 0) {
+#> Update relevant cols
+cs.2019.10$y.2019 = 1
+cs.2019.10$y.2020 = 1
+cs.2019.10$y.2021 = 1
+cs.2019.10$y.2022 = 1
+cs.2019.10$y.2023 = 1
+cs.2019.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2019[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2019
+CS.ng$y.2020[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2020
+CS.ng$y.2021[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2021
+CS.ng$y.2022[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2022
+CS.ng$y.2023[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2023
+CS.ng$y.2024[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2024
+}
+
+
+
+#> 7. Agreements starting in 20 running for 2years 
+cs.2020.2 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2020-01-01") & STARTDATE.2 <= as.Date("2020-12-31") & Years == 2)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2020.2)[1] != 0) {
+#> Update relevant cols
+cs.2020.2$y.2020 = 1
+cs.2020.2$y.2021 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2020[match(cs.2020.2$CSREF,  CS.ng$CSREF)] <- cs.2020.2$y.2020
+CS.ng$y.2021[match(cs.2020.2$CSREF,  CS.ng$CSREF)] <- cs.2020.2$y.2021
+}
+
+
+
+#> 8. Agreements starting in 20 running for 5 years 
+cs.2020.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2020-01-01") & STARTDATE.2 <= as.Date("2020-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2020.5)[1] != 0) {
+#> Update relevant cols
+cs.2020.5$y.2020 = 1
+cs.2020.5$y.2021 = 1
+cs.2020.5$y.2022 = 1
+cs.2020.5$y.2023 = 1
+cs.2020.5$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2020[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2020
+CS.ng$y.2021[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2021
+CS.ng$y.2022[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2022
+CS.ng$y.2023[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2023
+CS.ng$y.2024[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2024
+}
+
+
+
+#> 9. Agreements starting in 20 running for 10 years 
+cs.2020.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2020-01-01") & STARTDATE.2 <= as.Date("2020-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2020.10)[1] != 0) {
+#> Update relevant cols
+cs.2020.10$y.2020 = 1
+cs.2020.10$y.2021 = 1
+cs.2020.10$y.2022 = 1
+cs.2020.10$y.2023 = 1
+cs.2020.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2020[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2020
+CS.ng$y.2021[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2021
+CS.ng$y.2022[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2022
+CS.ng$y.2023[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2023
+CS.ng$y.2024[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2024
+}
+
+
+
+#> 10. Agreements starting in 21 running for 2 years 
+cs.2021.2 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2021-01-01") & STARTDATE.2 <= as.Date("2021-12-31") & Years == 2)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2021.2)[1] != 0) {
+#> Update relevant cols
+cs.2021.2$y.2021 = 1
+cs.2021.2$y.2022 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2021[match(cs.2021.2$CSREF,  CS.ng$CSREF)] <- cs.2021.2$y.2021
+CS.ng$y.2022[match(cs.2021.2$CSREF,  CS.ng$CSREF)] <- cs.2021.2$y.2022
+}
+
+
+#> 11. Agreements starting in 21 running for 5 years 
+cs.2021.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2021-01-01") & STARTDATE.2 <= as.Date("2021-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2021.5 )[1] != 0) {
+#> Update relevant cols
+cs.2021.5$y.2021 = 1
+cs.2021.5$y.2022 = 1
+cs.2021.5$y.2023 = 1
+cs.2021.5$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2021[match(cs.2021.5$CSREF,  CS.ng$CSREF)] <- cs.2021.5$y.2021
+CS.ng$y.2022[match(cs.2021.5$CSREF,  CS.ng$CSREF)] <- cs.2021.5$y.2022
+CS.ng$y.2023[match(cs.2021.5$CSREF,  CS.ng$CSREF)] <- cs.2021.5$y.2023
+CS.ng$y.2024[match(cs.2021.5$CSREF,  CS.ng$CSREF)] <- cs.2021.5$y.2024
+}
+
+
+
+#> 11. Agreements starting in 21 running for 10 years 
+cs.2021.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2021-01-01") & STARTDATE.2 <= as.Date("2021-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2021.10)[1] != 0) {
+#> Update relevant cols
+cs.2021.10$y.2021 = 1
+cs.2021.10$y.2022 = 1
+cs.2021.10$y.2023 = 1
+cs.2021.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2021[match(cs.2021.10$CSREF,  CS.ng$CSREF)] <- cs.2021.10$y.2021
+CS.ng$y.2022[match(cs.2021.10$CSREF,  CS.ng$CSREF)] <- cs.2021.10$y.2022
+CS.ng$y.2023[match(cs.2021.10$CSREF,  CS.ng$CSREF)] <- cs.2021.10$y.2023
+CS.ng$y.2024[match(cs.2021.10$CSREF,  CS.ng$CSREF)] <- cs.2021.10$y.2024
+}
+
+
+
+#> 12. Agreements starting in 21 running for 20 years 
+cs.2021.20 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2021-01-01") & STARTDATE.2 <= as.Date("2021-12-31") & Years == 20)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2021.20 )[1] != 0) {
+#> Update relevant cols
+cs.2021.20$y.2021 = 1
+cs.2021.20$y.2022 = 1
+cs.2021.20$y.2023 = 1
+cs.2021.20$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2021[match(cs.2021.20$CSREF,  CS.ng$CSREF)] <- cs.2021.20$y.2021
+CS.ng$y.2022[match(cs.2021.20$CSREF,  CS.ng$CSREF)] <- cs.2021.20$y.2022
+CS.ng$y.2023[match(cs.2021.20$CSREF,  CS.ng$CSREF)] <- cs.2021.20$y.2023
+CS.ng$y.2024[match(cs.2021.20$CSREF,  CS.ng$CSREF)] <- cs.2021.20$y.2024
+}
+
+
+
+#> 13. Agreements starting in 22 running for 2 years 
+cs.2022.2 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2022-01-01") & STARTDATE.2 <= as.Date("2022-12-31") & Years == 2)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2022.2)[1] != 0) {
+#> Update relevant cols
+cs.2022.2$y.2022 = 1
+cs.2022.2$y.2023 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2022[match(cs.2022.2$CSREF,  CS.ng$CSREF)] <- cs.2022.2$y.2022
+CS.ng$y.2023[match(cs.2022.2$CSREF,  CS.ng$CSREF)] <- cs.2022.2$y.2023
+}
+
+
+
+#> 14. Agreements starting in 22 running for 5 years 
+cs.2022.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2022-01-01") & STARTDATE.2 <= as.Date("2022-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2022.5)[1] != 0) {
+#> Update relevant cols
+cs.2022.5$y.2022 = 1
+cs.2022.5$y.2023 = 1
+cs.2022.5$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2022[match(cs.2022.5$CSREF,  CS.ng$CSREF)] <- cs.2022.5$y.2022
+CS.ng$y.2023[match(cs.2022.5$CSREF,  CS.ng$CSREF)] <- cs.2022.5$y.2023
+CS.ng$y.2024[match(cs.2022.5$CSREF,  CS.ng$CSREF)] <- cs.2022.5$y.2024
+}
+
+
+
+#> 15. Agreements starting in 22 running for 10 years 
+cs.2022.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2022-01-01") & STARTDATE.2 <= as.Date("2022-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2022.10)[1] != 0) {
+#> Update relevant cols
+cs.2022.10$y.2022 = 1
+cs.2022.10$y.2023 = 1
+cs.2022.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2022[match(cs.2022.10$CSREF,  CS.ng$CSREF)] <- cs.2022.10$y.2022
+CS.ng$y.2023[match(cs.2022.10$CSREF,  CS.ng$CSREF)] <- cs.2022.10$y.2023
+CS.ng$y.2024[match(cs.2022.10$CSREF,  CS.ng$CSREF)] <- cs.2022.10$y.2024
+}
+
+
+
+# Remove records where average annual cost id "unavailable"
+CS.final <- CS.ng[!(CS.ng$AVGANNCOST=="*Unavailable"),]
+
+
+
+# Export final raw data table
+write_csv(CS.final, here("Out", "AES", "CS", "County", "CSV", paste0("CS_", active_county, "_Raw_Processed.csv")))
+
+# # Export final raw data table - TESTING
+# write_csv(CS.final, here("Out", "AES", "CS", "County", "CSV", paste0("CS__Raw_Processed_Test.csv")))
+
+
+
+# Change annual cost column to numerical
+CS.final$AVGANNCOST <- as.numeric(CS.final$AVGANNCOST)
+CS.final$AVGANNCOST <- round(CS.final$AVGANNCOST, 2)
+
+
+#> Calculate annual costs
+#> Total for 2018
+CS.2018.Total <- CS.final %>% 
+  filter(y.2018 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2018 <- sum(CS.2018.Total$AVGANNCOST)
+
+#> Total for 2019
+CS.2019.Total <- CS.final %>% 
+  filter(y.2019 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2019 <- sum(CS.2019.Total$AVGANNCOST)
+
+
+#> Total for 2020
+CS.2020.Total <- CS.final %>% 
+  filter(y.2020 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2020 <- sum(CS.2020.Total$AVGANNCOST)
+
+
+#> Total for 2021
+CS.2021.Total <- CS.final %>% 
+  filter(y.2021 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2021 <- sum(CS.2021.Total$AVGANNCOST)
+
+#> Total for 2022
+CS.2022.Total <- CS.final %>% 
+  filter(y.2022 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2022 <- sum(CS.2022.Total$AVGANNCOST)
+
+#> Total for 2023
+CS.2023.Total <- CS.final %>% 
+  filter(y.2023 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2023 <- sum(CS.2023.Total$AVGANNCOST)
+
+#> Total for 2024
+CS.2024.Total <- CS.final %>% 
+  filter(y.2024 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2024 <- sum(CS.2024.Total$AVGANNCOST)
+
+
+#> Create data frame of annual costs
+CS_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0), Total_2024 = numeric(0)))
+totals.cs <- c(CS.sum.2018, CS.sum.2019, CS.sum.2020, CS.sum.2021, CS.sum.2022, CS.sum.2023, CS.sum.2024)
+#> Insert figure for 2018
+df2 <- miscTools::insertRow(CS_Summary, 1, totals.cs)
+df2 <- as.data.frame(df2)
+
+#> Print table district.summary on web page
+print(knitr::kable(df2, caption = paste0("Table 4.4.", i , " ", "CS payments - ",  active_county)))
+
+#> Make long
+df2.plot <- melt(df2)
+#> Extract year from string
+names(df2.plot)[1]<-paste("Year")
+names(df2.plot)[2]<-paste("Value_cs")
+df2.plot$Year <- sub("^.*([0-9]{4}).*", "\\1", df2.plot$Year)
+
+# Simple bar chart
+plot.cs <- ggplot(df2.plot, aes(x=Year, y=Value_cs)) + 
+  geom_bar(stat = "identity", fill="#e38d0b", width = 0.6) +
+  theme_bw() +
+  labs(title = paste0("Countryside Stewardship payments: ", active_county), x = "Year", y = "Value (£)") +
+  geom_text(aes(label= paste0(round(Value_cs / 1000000, digits = 2), " M")), vjust = 1.5, colour = "white", size = 3.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 16, b = 0, l = 0))) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(legend.position="none") +
+  scale_y_continuous(labels = unit_format(unit = "M", scale = 1e-6))
+plot.cs
+print(plot.cs)
+
+
+#> Export the plot
+ggsave(here("Out", "AES", "CS", "County", "Plot", paste0("CS_payments_", active_county, ".png")), width = 7, height = 5)
+
+# #> Export the plot - TESTING
+# ggsave(here("Out", "AES", "CS", "County", "Plot", paste0("CS_payments_County_Test.png")), width = 7, height = 5)
+
+
+#Export table
+write_csv(df2, here("Out", "AES", "CS", "County", "CSV", paste0("CS_payments_", active_county, ".csv")))
+
+
+# #Export table - TESTING
+# write_csv(df2, here("Out", "AES", "CS", "County", "CSV", "CS_payments_County_Test.csv"))
+
+}
+
+
+
+```
+
+
+
+
+### 4.5 CS - District-level
+
+District-level analysis of Countryside Stewardship (CS) payments. Methods overview to follow. 
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+
+
+#> Get data
+CS <- st_read(here("In", "Shape", "AES", "CS_SouthWest_PoI.shp"), stringsAsFactors = FALSE, quiet = TRUE)
+
+#> Get district boundary data for SW counties
+districts.sw <- st_read(here("In", "Shape", "Districts.SW.UPDATED.2.shp"), quiet = TRUE)
+
+#? Remove string "(B)" from district names
+# # districts.sw$NAME <- str_remove_all(districts.sw$NAME, "(B)")
+districts.sw$NAME<- gsub("\\s*\\([^\\)]+\\)", "", districts.sw$NAME)
+#> Trim WS
+districts.sw$NAME<- trimws(districts.sw$NAME)
+# glimpse(districts.sw)
+  
+#> Create list for loop
+districts.list <- as.list(districts.sw$NAME)
+
+
+
+i <- 0
+#> Initiate loop
+for(active_district in districts.list){
+
+#> Loop counter (for table caption number)
+i <- i+1
+
+#> Get a boundary shapefile for the active county
+target_district <- districts.sw |>
+  filter(NAME == active_district)
+
+
+#> Intersect with target county polygon
+int <- st_intersection(CS, target_district)
+
+#> Rename intersected data
+CS.ng <- int
+
+#> New start date field in date format
+CS.ng$STARTDATE.2 <- lubridate::dmy_hms(CS.ng$STARTDATE) 
+#> New end date field in date format
+CS.ng$ENDDATE.2 <- lubridate::dmy_hms(CS.ng$ENDDATE) 
+#> Format dates
+CS.ng$STARTDATE.2 <- as.Date(CS.ng$STARTDATE.2, format = "%d/%m/%Y")
+CS.ng$ENDDATE.2 <- as.Date(CS.ng$ENDDATE.2, format = "%d/%m/%Y")
+
+#> Create a column to get number of years
+CS.ng$Years <- as.numeric(CS.ng$ENDDATE.2 - CS.ng$STARTDATE.2)
+CS.ng$Years <- CS.ng$Years /365
+CS.ng$Years <- round(CS.ng$Years, 0)
+#> List of agreement duration in years - unique duration
+years.unique <- unique(CS.ng$Years)
+
+# #> Export table for team use
+# write_csv(CS.ng, here("Out", "AES", "CS", "County", "CSV", paste0("CS_Agreements_", active_county, ".csv")))
+
+
+#> Export table for team use
+write_csv(CS.ng, here("Out", "AES", "CS", "District", "CSV", paste0("CS_Agreements", active_district, ".csv")))
+
+
+#Create individual year columns to assign agreements to different years based on start date and duration - code for that to follow below
+CS.ng$y.2016 <- 0
+CS.ng$y.2017 <- 0 
+CS.ng$y.2018 <- 0
+CS.ng$y.2019 <- 0
+CS.ng$y.2020 <- 0
+CS.ng$y.2021 <- 0
+CS.ng$y.2022 <- 0
+CS.ng$y.2023 <- 0
+CS.ng$y.2024 <- 0
+
+#> Get unique combinations of agreements-years
+unique.agree2 <- count(CS.ng, STARTDATE.2, Years) %>% 
+  ungroup()
+#> Export
+write_csv(unique.agree2, (here("Out", "AES", "CS", "CS_Unique_Agree-Year_for_checking.csv")))
+
+
+#> 1. Agreements starting in 2016 running for 10 years
+cs.2016.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2016-01-01") & STARTDATE.2 <= as.Date("2016-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2016.10)[1] != 0) {
+#> Update relevant cols
+cs.2016.10$y.2016 = 1
+cs.2016.10$y.2017 = 1
+cs.2016.10$y.2018 = 1
+cs.2016.10$y.2019 = 1
+cs.2016.10$y.2020 = 1
+cs.2016.10$y.2021 = 1
+cs.2016.10$y.2022 = 1
+cs.2016.10$y.2023 = 1
+cs.2016.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2016[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2016
+CS.ng$y.2017[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2017
+CS.ng$y.2018[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2018
+CS.ng$y.2019[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2019
+CS.ng$y.2020[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2020
+CS.ng$y.2021[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2021
+CS.ng$y.2022[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2022
+CS.ng$y.2023[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2023
+CS.ng$y.2024[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2024
+}
+
+
+#> 2. Agreements starting in 2017 running for 10 years
+cs.2017.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2017-01-01") & STARTDATE.2 <= as.Date("2017-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2017.10)[1] != 0) {
+#> Update relevant cols
+cs.2017.10$y.2017 = 1
+cs.2017.10$y.2018 = 1
+cs.2017.10$y.2019 = 1
+cs.2017.10$y.2020 = 1
+cs.2017.10$y.2021 = 1
+cs.2017.10$y.2022 = 1
+cs.2017.10$y.2023 = 1
+cs.2017.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2017[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2017
+CS.ng$y.2018[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2018
+CS.ng$y.2019[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2019
+CS.ng$y.2020[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2020
+CS.ng$y.2021[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2021
+CS.ng$y.2022[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2022
+CS.ng$y.2023[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2023
+CS.ng$y.2024[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2024
+}
+
+
+
+#> 3. Agreements starting in 2018 running for 5 years 
+cs.2018.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2018-01-01") & STARTDATE.2 <= as.Date("2018-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2018.5)[1] != 0) {
+#> Update relevant cols
+cs.2018.5$y.2018 = 1
+cs.2018.5$y.2019 = 1
+cs.2018.5$y.2020 = 1
+cs.2018.5$y.2021 = 1
+cs.2018.5$y.2022 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2018[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2018
+CS.ng$y.2019[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2019
+CS.ng$y.2020[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2020
+CS.ng$y.2021[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2021
+CS.ng$y.2022[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2022
+}
+
+
+
+#> 4. Agreements starting in 2018 running for 10 years 
+cs.2018.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2018-01-01") & STARTDATE.2 <= as.Date("2018-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2018.10)[1] != 0) {
+#> Update relevant cols
+cs.2018.10$y.2018 = 1
+cs.2018.10$y.2019 = 1
+cs.2018.10$y.2020 = 1
+cs.2018.10$y.2021 = 1
+cs.2018.10$y.2022 = 1
+cs.2018.10$y.2023 = 1
+cs.2018.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2018[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2018
+CS.ng$y.2019[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2019
+CS.ng$y.2020[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2020
+CS.ng$y.2021[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2021
+CS.ng$y.2022[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2022
+CS.ng$y.2023[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2023
+CS.ng$y.2024[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2024
+}
+
+
+
+#> 5. Agreements starting in 2019 running for 5 years 
+cs.2019.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2019-01-01") & STARTDATE.2 <= as.Date("2019-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2019.5)[1] != 0) {
+#> Update relevant cols
+cs.2019.5$y.2019 = 1
+cs.2019.5$y.2020 = 1
+cs.2019.5$y.2021 = 1
+cs.2019.5$y.2022 = 1
+cs.2019.5$y.2023 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2019[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2019
+CS.ng$y.2020[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2020
+CS.ng$y.2021[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2021
+CS.ng$y.2022[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2022
+CS.ng$y.2023[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2023
+}
+
+
+
+#> 6. Agreements starting in 2019 running for 10 years 
+cs.2019.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2019-01-01") & STARTDATE.2 <= as.Date("2019-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2019.10)[1] != 0) {
+#> Update relevant cols
+cs.2019.10$y.2019 = 1
+cs.2019.10$y.2020 = 1
+cs.2019.10$y.2021 = 1
+cs.2019.10$y.2022 = 1
+cs.2019.10$y.2023 = 1
+cs.2019.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2019[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2019
+CS.ng$y.2020[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2020
+CS.ng$y.2021[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2021
+CS.ng$y.2022[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2022
+CS.ng$y.2023[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2023
+CS.ng$y.2024[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2024
+}
+
+
+
+#> 7. Agreements starting in 20 running for 2years 
+cs.2020.2 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2020-01-01") & STARTDATE.2 <= as.Date("2020-12-31") & Years == 2)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2020.2)[1] != 0) {
+#> Update relevant cols
+cs.2020.2$y.2020 = 1
+cs.2020.2$y.2021 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2020[match(cs.2020.2$CSREF,  CS.ng$CSREF)] <- cs.2020.2$y.2020
+CS.ng$y.2021[match(cs.2020.2$CSREF,  CS.ng$CSREF)] <- cs.2020.2$y.2021
+}
+
+
+
+#> 8. Agreements starting in 20 running for 5 years 
+cs.2020.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2020-01-01") & STARTDATE.2 <= as.Date("2020-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2020.5)[1] != 0) {
+#> Update relevant cols
+cs.2020.5$y.2020 = 1
+cs.2020.5$y.2021 = 1
+cs.2020.5$y.2022 = 1
+cs.2020.5$y.2023 = 1
+cs.2020.5$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2020[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2020
+CS.ng$y.2021[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2021
+CS.ng$y.2022[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2022
+CS.ng$y.2023[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2023
+CS.ng$y.2024[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2024
+}
+
+
+
+#> 9. Agreements starting in 20 running for 10 years 
+cs.2020.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2020-01-01") & STARTDATE.2 <= as.Date("2020-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2020.10)[1] != 0) {
+#> Update relevant cols
+cs.2020.10$y.2020 = 1
+cs.2020.10$y.2021 = 1
+cs.2020.10$y.2022 = 1
+cs.2020.10$y.2023 = 1
+cs.2020.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2020[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2020
+CS.ng$y.2021[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2021
+CS.ng$y.2022[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2022
+CS.ng$y.2023[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2023
+CS.ng$y.2024[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2024
+}
+
+
+
+#> 10. Agreements starting in 21 running for 2 years 
+cs.2021.2 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2021-01-01") & STARTDATE.2 <= as.Date("2021-12-31") & Years == 2)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2021.2)[1] != 0) {
+#> Update relevant cols
+cs.2021.2$y.2021 = 1
+cs.2021.2$y.2022 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2021[match(cs.2021.2$CSREF,  CS.ng$CSREF)] <- cs.2021.2$y.2021
+CS.ng$y.2022[match(cs.2021.2$CSREF,  CS.ng$CSREF)] <- cs.2021.2$y.2022
+}
+
+
+#> 11. Agreements starting in 21 running for 5 years 
+cs.2021.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2021-01-01") & STARTDATE.2 <= as.Date("2021-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2021.5 )[1] != 0) {
+#> Update relevant cols
+cs.2021.5$y.2021 = 1
+cs.2021.5$y.2022 = 1
+cs.2021.5$y.2023 = 1
+cs.2021.5$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2021[match(cs.2021.5$CSREF,  CS.ng$CSREF)] <- cs.2021.5$y.2021
+CS.ng$y.2022[match(cs.2021.5$CSREF,  CS.ng$CSREF)] <- cs.2021.5$y.2022
+CS.ng$y.2023[match(cs.2021.5$CSREF,  CS.ng$CSREF)] <- cs.2021.5$y.2023
+CS.ng$y.2024[match(cs.2021.5$CSREF,  CS.ng$CSREF)] <- cs.2021.5$y.2024
+}
+
+
+
+#> 11. Agreements starting in 21 running for 10 years 
+cs.2021.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2021-01-01") & STARTDATE.2 <= as.Date("2021-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2021.10)[1] != 0) {
+#> Update relevant cols
+cs.2021.10$y.2021 = 1
+cs.2021.10$y.2022 = 1
+cs.2021.10$y.2023 = 1
+cs.2021.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2021[match(cs.2021.10$CSREF,  CS.ng$CSREF)] <- cs.2021.10$y.2021
+CS.ng$y.2022[match(cs.2021.10$CSREF,  CS.ng$CSREF)] <- cs.2021.10$y.2022
+CS.ng$y.2023[match(cs.2021.10$CSREF,  CS.ng$CSREF)] <- cs.2021.10$y.2023
+CS.ng$y.2024[match(cs.2021.10$CSREF,  CS.ng$CSREF)] <- cs.2021.10$y.2024
+}
+
+
+
+#> 12. Agreements starting in 21 running for 20 years 
+cs.2021.20 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2021-01-01") & STARTDATE.2 <= as.Date("2021-12-31") & Years == 20)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2021.20 )[1] != 0) {
+#> Update relevant cols
+cs.2021.20$y.2021 = 1
+cs.2021.20$y.2022 = 1
+cs.2021.20$y.2023 = 1
+cs.2021.20$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2021[match(cs.2021.20$CSREF,  CS.ng$CSREF)] <- cs.2021.20$y.2021
+CS.ng$y.2022[match(cs.2021.20$CSREF,  CS.ng$CSREF)] <- cs.2021.20$y.2022
+CS.ng$y.2023[match(cs.2021.20$CSREF,  CS.ng$CSREF)] <- cs.2021.20$y.2023
+CS.ng$y.2024[match(cs.2021.20$CSREF,  CS.ng$CSREF)] <- cs.2021.20$y.2024
+}
+
+
+
+#> 13. Agreements starting in 22 running for 2 years 
+cs.2022.2 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2022-01-01") & STARTDATE.2 <= as.Date("2022-12-31") & Years == 2)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2022.2)[1] != 0) {
+#> Update relevant cols
+cs.2022.2$y.2022 = 1
+cs.2022.2$y.2023 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2022[match(cs.2022.2$CSREF,  CS.ng$CSREF)] <- cs.2022.2$y.2022
+CS.ng$y.2023[match(cs.2022.2$CSREF,  CS.ng$CSREF)] <- cs.2022.2$y.2023
+}
+
+
+
+#> 14. Agreements starting in 22 running for 5 years 
+cs.2022.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2022-01-01") & STARTDATE.2 <= as.Date("2022-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2022.5)[1] != 0) {
+#> Update relevant cols
+cs.2022.5$y.2022 = 1
+cs.2022.5$y.2023 = 1
+cs.2022.5$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2022[match(cs.2022.5$CSREF,  CS.ng$CSREF)] <- cs.2022.5$y.2022
+CS.ng$y.2023[match(cs.2022.5$CSREF,  CS.ng$CSREF)] <- cs.2022.5$y.2023
+CS.ng$y.2024[match(cs.2022.5$CSREF,  CS.ng$CSREF)] <- cs.2022.5$y.2024
+}
+
+
+
+#> 15. Agreements starting in 22 running for 10 years 
+cs.2022.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2022-01-01") & STARTDATE.2 <= as.Date("2022-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2022.10)[1] != 0) {
+#> Update relevant cols
+cs.2022.10$y.2022 = 1
+cs.2022.10$y.2023 = 1
+cs.2022.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2022[match(cs.2022.10$CSREF,  CS.ng$CSREF)] <- cs.2022.10$y.2022
+CS.ng$y.2023[match(cs.2022.10$CSREF,  CS.ng$CSREF)] <- cs.2022.10$y.2023
+CS.ng$y.2024[match(cs.2022.10$CSREF,  CS.ng$CSREF)] <- cs.2022.10$y.2024
+}
+
+
+
+# Remove records where average annual cost id "unavailable"
+CS.final <- CS.ng[!(CS.ng$AVGANNCOST=="*Unavailable"),]
+
+
+
+# Export final raw data table
+write_csv(CS.final, here("Out", "AES", "CS", "District", "CSV", paste0("CS_", active_district, "_Raw_Processed.csv")))
+
+# # Export final raw data table - TESTING
+# write_csv(CS.final, here("Out", "AES", "CS", "County", "CSV", paste0("CS__Raw_Processed_Test.csv")))
+
+
+
+# Change annual cost column to numerical
+CS.final$AVGANNCOST <- as.numeric(CS.final$AVGANNCOST)
+CS.final$AVGANNCOST <- round(CS.final$AVGANNCOST, 2)
+
+
+#> Calculate annual costs
+#> Total for 2018
+CS.2018.Total <- CS.final %>% 
+  filter(y.2018 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2018 <- sum(CS.2018.Total$AVGANNCOST)
+
+#> Total for 2019
+CS.2019.Total <- CS.final %>% 
+  filter(y.2019 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2019 <- sum(CS.2019.Total$AVGANNCOST)
+
+
+#> Total for 2020
+CS.2020.Total <- CS.final %>% 
+  filter(y.2020 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2020 <- sum(CS.2020.Total$AVGANNCOST)
+
+
+#> Total for 2021
+CS.2021.Total <- CS.final %>% 
+  filter(y.2021 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2021 <- sum(CS.2021.Total$AVGANNCOST)
+
+#> Total for 2022
+CS.2022.Total <- CS.final %>% 
+  filter(y.2022 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2022 <- sum(CS.2022.Total$AVGANNCOST)
+
+#> Total for 2023
+CS.2023.Total <- CS.final %>% 
+  filter(y.2023 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2023 <- sum(CS.2023.Total$AVGANNCOST)
+
+#> Total for 2024
+CS.2024.Total <- CS.final %>% 
+  filter(y.2024 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2024 <- sum(CS.2024.Total$AVGANNCOST)
+
+
+#> Create data frame of annual costs
+CS_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0), Total_2024 = numeric(0)))
+totals.cs <- c(CS.sum.2018, CS.sum.2019, CS.sum.2020, CS.sum.2021, CS.sum.2022, CS.sum.2023, CS.sum.2024)
+#> Insert figure for 2018
+df2 <- miscTools::insertRow(CS_Summary, 1, totals.cs)
+df2 <- as.data.frame(df2)
+
+#> If there are any negative values in df2, convert these to zero
+df2[df2 <0] <- 0
+
+#> Print table district.summary on web page
+print(knitr::kable(df2, caption = paste0("Table 4.5.", i , " ", "CS payments - ",  active_district)))
+
+#> Make long
+df2.plot <- melt(df2)
+#> Extract year from string
+names(df2.plot)[1]<-paste("Year")
+names(df2.plot)[2]<-paste("Value_cs")
+df2.plot$Year <- sub("^.*([0-9]{4}).*", "\\1", df2.plot$Year)
+
+# Simple bar chart
+plot.cs <- ggplot(df2.plot, aes(x=Year, y=Value_cs)) + 
+  geom_bar(stat = "identity", fill="#e38d0b", width = 0.6) +
+  theme_bw() +
+  labs(title = paste0("Countryside Stewardship payments: ", active_district), x = "Year", y = "Value (£)") +
+  geom_text(aes(label= paste0(round(Value_cs / 1000000, digits = 2), " M")), vjust = 1.5, colour = "white", size = 3.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 16, b = 0, l = 0))) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(legend.position="none") +
+  scale_y_continuous(labels = unit_format(unit = "M", scale = 1e-6))
+plot.cs
+print(plot.cs)
+
+
+#> Export the plot
+ggsave(here("Out", "AES", "CS", "District", "Plot", paste0("CS_payments_", active_district, ".png")), width = 7, height = 5)
+
+# #> Export the plot - TESTING
+# ggsave(here("Out", "AES", "CS", "County", "Plot", paste0("CS_payments_County_Test.png")), width = 7, height = 5)
+
+
+#Export table
+write_csv(df2, here("Out", "AES", "CS", "District", "CSV", paste0("CS_payments_", active_district, ".csv")))
+
+
+# #Export table - TESTING
+# write_csv(df2, here("Out", "AES", "CS", "County", "CSV", "CS_payments_County_Test.csv"))
+
+}
+
+
+
+```
+
+
+
+### 4.6 CS - National Parks
+
+
+National Park-level analysis of Countryside Stewardship (CS) payments. Methods overview to follow. 
+
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+
+
+#> Get data
+CS <- st_read(here("In", "Shape", "AES", "CS_SouthWest_PoI.shp"), stringsAsFactors = FALSE, quiet = TRUE)
+
+#> Create filter string (get names first!)
+nat.parks.list <- c("Exmoor", "Dartmoor")
+
+#> Sequential integer counter (for figure numbers)
+i <-0 
+
+#> Initiate loop
+for(active_park in nat.parks.list){
+  
+#> Loop counter (for table caption number)
+i <- i+1
+
+#> Select target county (this will be start of loop)
+target_park <- nat.parks|> 
+  filter(NAME == active_park)
+
+
+#> Intersect with target county polygon
+int <- st_intersection(CS, target_park)
+
+#> Rename intersected data
+CS.ng <- int
+
+#> New start date field in date format
+CS.ng$STARTDATE.2 <- lubridate::dmy_hms(CS.ng$STARTDATE) 
+#> New end date field in date format
+CS.ng$ENDDATE.2 <- lubridate::dmy_hms(CS.ng$ENDDATE) 
+#> Format dates
+CS.ng$STARTDATE.2 <- as.Date(CS.ng$STARTDATE.2, format = "%d/%m/%Y")
+CS.ng$ENDDATE.2 <- as.Date(CS.ng$ENDDATE.2, format = "%d/%m/%Y")
+
+#> Create a column to get number of years
+CS.ng$Years <- as.numeric(CS.ng$ENDDATE.2 - CS.ng$STARTDATE.2)
+CS.ng$Years <- CS.ng$Years /365
+CS.ng$Years <- round(CS.ng$Years, 0)
+#> List of agreement duration in years - unique duration
+years.unique <- unique(CS.ng$Years)
+
+# #> Export table for team use
+# write_csv(CS.ng, here("Out", "AES", "CS", "County", "CSV", paste0("CS_Agreements_", active_county, ".csv")))
+
+
+#> Export table for team use
+write_csv(CS.ng, here("Out", "AES", "CS", "Nat_Park", "CSV", paste0("CS_Agreements", active_park, ".csv")))
+
+
+#Create individual year columns to assign agreements to different years based on start date and duration - code for that to follow below
+CS.ng$y.2016 <- 0
+CS.ng$y.2017 <- 0 
+CS.ng$y.2018 <- 0
+CS.ng$y.2019 <- 0
+CS.ng$y.2020 <- 0
+CS.ng$y.2021 <- 0
+CS.ng$y.2022 <- 0
+CS.ng$y.2023 <- 0
+CS.ng$y.2024 <- 0
+
+#> Get unique combinations of agreements-years
+unique.agree2 <- count(CS.ng, STARTDATE.2, Years) %>% 
+  ungroup()
+#> Export
+write_csv(unique.agree2, (here("Out", "AES", "CS", "CS_Unique_Agree-Year_for_checking.csv")))
+
+
+#> 1. Agreements starting in 2016 running for 10 years
+cs.2016.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2016-01-01") & STARTDATE.2 <= as.Date("2016-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2016.10)[1] != 0) {
+#> Update relevant cols
+cs.2016.10$y.2016 = 1
+cs.2016.10$y.2017 = 1
+cs.2016.10$y.2018 = 1
+cs.2016.10$y.2019 = 1
+cs.2016.10$y.2020 = 1
+cs.2016.10$y.2021 = 1
+cs.2016.10$y.2022 = 1
+cs.2016.10$y.2023 = 1
+cs.2016.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2016[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2016
+CS.ng$y.2017[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2017
+CS.ng$y.2018[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2018
+CS.ng$y.2019[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2019
+CS.ng$y.2020[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2020
+CS.ng$y.2021[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2021
+CS.ng$y.2022[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2022
+CS.ng$y.2023[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2023
+CS.ng$y.2024[match(cs.2016.10$CSREF,  CS.ng$CSREF)] <- cs.2016.10$y.2024
+}
+
+
+#> 2. Agreements starting in 2017 running for 10 years
+cs.2017.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2017-01-01") & STARTDATE.2 <= as.Date("2017-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2017.10)[1] != 0) {
+#> Update relevant cols
+cs.2017.10$y.2017 = 1
+cs.2017.10$y.2018 = 1
+cs.2017.10$y.2019 = 1
+cs.2017.10$y.2020 = 1
+cs.2017.10$y.2021 = 1
+cs.2017.10$y.2022 = 1
+cs.2017.10$y.2023 = 1
+cs.2017.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2017[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2017
+CS.ng$y.2018[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2018
+CS.ng$y.2019[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2019
+CS.ng$y.2020[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2020
+CS.ng$y.2021[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2021
+CS.ng$y.2022[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2022
+CS.ng$y.2023[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2023
+CS.ng$y.2024[match(cs.2017.10$CSREF,  CS.ng$CSREF)] <- cs.2017.10$y.2024
+}
+
+
+
+#> 3. Agreements starting in 2018 running for 5 years 
+cs.2018.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2018-01-01") & STARTDATE.2 <= as.Date("2018-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2018.5)[1] != 0) {
+#> Update relevant cols
+cs.2018.5$y.2018 = 1
+cs.2018.5$y.2019 = 1
+cs.2018.5$y.2020 = 1
+cs.2018.5$y.2021 = 1
+cs.2018.5$y.2022 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2018[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2018
+CS.ng$y.2019[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2019
+CS.ng$y.2020[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2020
+CS.ng$y.2021[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2021
+CS.ng$y.2022[match(cs.2018.5$CSREF,  CS.ng$CSREF)] <- cs.2018.5$y.2022
+}
+
+
+
+#> 4. Agreements starting in 2018 running for 10 years 
+cs.2018.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2018-01-01") & STARTDATE.2 <= as.Date("2018-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2018.10)[1] != 0) {
+#> Update relevant cols
+cs.2018.10$y.2018 = 1
+cs.2018.10$y.2019 = 1
+cs.2018.10$y.2020 = 1
+cs.2018.10$y.2021 = 1
+cs.2018.10$y.2022 = 1
+cs.2018.10$y.2023 = 1
+cs.2018.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2018[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2018
+CS.ng$y.2019[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2019
+CS.ng$y.2020[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2020
+CS.ng$y.2021[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2021
+CS.ng$y.2022[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2022
+CS.ng$y.2023[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2023
+CS.ng$y.2024[match(cs.2018.10$CSREF,  CS.ng$CSREF)] <- cs.2018.10$y.2024
+}
+
+
+
+#> 5. Agreements starting in 2019 running for 5 years 
+cs.2019.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2019-01-01") & STARTDATE.2 <= as.Date("2019-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2019.5)[1] != 0) {
+#> Update relevant cols
+cs.2019.5$y.2019 = 1
+cs.2019.5$y.2020 = 1
+cs.2019.5$y.2021 = 1
+cs.2019.5$y.2022 = 1
+cs.2019.5$y.2023 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2019[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2019
+CS.ng$y.2020[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2020
+CS.ng$y.2021[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2021
+CS.ng$y.2022[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2022
+CS.ng$y.2023[match(cs.2019.5$CSREF,  CS.ng$CSREF)] <- cs.2019.5$y.2023
+}
+
+
+
+#> 6. Agreements starting in 2019 running for 10 years 
+cs.2019.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2019-01-01") & STARTDATE.2 <= as.Date("2019-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2019.10)[1] != 0) {
+#> Update relevant cols
+cs.2019.10$y.2019 = 1
+cs.2019.10$y.2020 = 1
+cs.2019.10$y.2021 = 1
+cs.2019.10$y.2022 = 1
+cs.2019.10$y.2023 = 1
+cs.2019.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2019[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2019
+CS.ng$y.2020[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2020
+CS.ng$y.2021[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2021
+CS.ng$y.2022[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2022
+CS.ng$y.2023[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2023
+CS.ng$y.2024[match(cs.2019.10$CSREF,  CS.ng$CSREF)] <- cs.2019.10$y.2024
+}
+
+
+
+#> 7. Agreements starting in 20 running for 2years 
+cs.2020.2 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2020-01-01") & STARTDATE.2 <= as.Date("2020-12-31") & Years == 2)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2020.2)[1] != 0) {
+#> Update relevant cols
+cs.2020.2$y.2020 = 1
+cs.2020.2$y.2021 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2020[match(cs.2020.2$CSREF,  CS.ng$CSREF)] <- cs.2020.2$y.2020
+CS.ng$y.2021[match(cs.2020.2$CSREF,  CS.ng$CSREF)] <- cs.2020.2$y.2021
+}
+
+
+
+#> 8. Agreements starting in 20 running for 5 years 
+cs.2020.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2020-01-01") & STARTDATE.2 <= as.Date("2020-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2020.5)[1] != 0) {
+#> Update relevant cols
+cs.2020.5$y.2020 = 1
+cs.2020.5$y.2021 = 1
+cs.2020.5$y.2022 = 1
+cs.2020.5$y.2023 = 1
+cs.2020.5$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2020[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2020
+CS.ng$y.2021[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2021
+CS.ng$y.2022[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2022
+CS.ng$y.2023[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2023
+CS.ng$y.2024[match(cs.2020.5$CSREF,  CS.ng$CSREF)] <- cs.2020.5$y.2024
+}
+
+
+
+#> 9. Agreements starting in 20 running for 10 years 
+cs.2020.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2020-01-01") & STARTDATE.2 <= as.Date("2020-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2020.10)[1] != 0) {
+#> Update relevant cols
+cs.2020.10$y.2020 = 1
+cs.2020.10$y.2021 = 1
+cs.2020.10$y.2022 = 1
+cs.2020.10$y.2023 = 1
+cs.2020.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2020[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2020
+CS.ng$y.2021[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2021
+CS.ng$y.2022[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2022
+CS.ng$y.2023[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2023
+CS.ng$y.2024[match(cs.2020.10$CSREF,  CS.ng$CSREF)] <- cs.2020.10$y.2024
+}
+
+
+
+#> 10. Agreements starting in 21 running for 2 years 
+cs.2021.2 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2021-01-01") & STARTDATE.2 <= as.Date("2021-12-31") & Years == 2)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2021.2)[1] != 0) {
+#> Update relevant cols
+cs.2021.2$y.2021 = 1
+cs.2021.2$y.2022 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2021[match(cs.2021.2$CSREF,  CS.ng$CSREF)] <- cs.2021.2$y.2021
+CS.ng$y.2022[match(cs.2021.2$CSREF,  CS.ng$CSREF)] <- cs.2021.2$y.2022
+}
+
+
+#> 11. Agreements starting in 21 running for 5 years 
+cs.2021.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2021-01-01") & STARTDATE.2 <= as.Date("2021-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2021.5 )[1] != 0) {
+#> Update relevant cols
+cs.2021.5$y.2021 = 1
+cs.2021.5$y.2022 = 1
+cs.2021.5$y.2023 = 1
+cs.2021.5$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2021[match(cs.2021.5$CSREF,  CS.ng$CSREF)] <- cs.2021.5$y.2021
+CS.ng$y.2022[match(cs.2021.5$CSREF,  CS.ng$CSREF)] <- cs.2021.5$y.2022
+CS.ng$y.2023[match(cs.2021.5$CSREF,  CS.ng$CSREF)] <- cs.2021.5$y.2023
+CS.ng$y.2024[match(cs.2021.5$CSREF,  CS.ng$CSREF)] <- cs.2021.5$y.2024
+}
+
+
+
+#> 11. Agreements starting in 21 running for 10 years 
+cs.2021.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2021-01-01") & STARTDATE.2 <= as.Date("2021-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2021.10)[1] != 0) {
+#> Update relevant cols
+cs.2021.10$y.2021 = 1
+cs.2021.10$y.2022 = 1
+cs.2021.10$y.2023 = 1
+cs.2021.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2021[match(cs.2021.10$CSREF,  CS.ng$CSREF)] <- cs.2021.10$y.2021
+CS.ng$y.2022[match(cs.2021.10$CSREF,  CS.ng$CSREF)] <- cs.2021.10$y.2022
+CS.ng$y.2023[match(cs.2021.10$CSREF,  CS.ng$CSREF)] <- cs.2021.10$y.2023
+CS.ng$y.2024[match(cs.2021.10$CSREF,  CS.ng$CSREF)] <- cs.2021.10$y.2024
+}
+
+
+
+#> 12. Agreements starting in 21 running for 20 years 
+cs.2021.20 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2021-01-01") & STARTDATE.2 <= as.Date("2021-12-31") & Years == 20)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2021.20 )[1] != 0) {
+#> Update relevant cols
+cs.2021.20$y.2021 = 1
+cs.2021.20$y.2022 = 1
+cs.2021.20$y.2023 = 1
+cs.2021.20$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2021[match(cs.2021.20$CSREF,  CS.ng$CSREF)] <- cs.2021.20$y.2021
+CS.ng$y.2022[match(cs.2021.20$CSREF,  CS.ng$CSREF)] <- cs.2021.20$y.2022
+CS.ng$y.2023[match(cs.2021.20$CSREF,  CS.ng$CSREF)] <- cs.2021.20$y.2023
+CS.ng$y.2024[match(cs.2021.20$CSREF,  CS.ng$CSREF)] <- cs.2021.20$y.2024
+}
+
+
+
+#> 13. Agreements starting in 22 running for 2 years 
+cs.2022.2 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2022-01-01") & STARTDATE.2 <= as.Date("2022-12-31") & Years == 2)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2022.2)[1] != 0) {
+#> Update relevant cols
+cs.2022.2$y.2022 = 1
+cs.2022.2$y.2023 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2022[match(cs.2022.2$CSREF,  CS.ng$CSREF)] <- cs.2022.2$y.2022
+CS.ng$y.2023[match(cs.2022.2$CSREF,  CS.ng$CSREF)] <- cs.2022.2$y.2023
+}
+
+
+
+#> 14. Agreements starting in 22 running for 5 years 
+cs.2022.5 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2022-01-01") & STARTDATE.2 <= as.Date("2022-12-31") & Years == 5)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2022.5)[1] != 0) {
+#> Update relevant cols
+cs.2022.5$y.2022 = 1
+cs.2022.5$y.2023 = 1
+cs.2022.5$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2022[match(cs.2022.5$CSREF,  CS.ng$CSREF)] <- cs.2022.5$y.2022
+CS.ng$y.2023[match(cs.2022.5$CSREF,  CS.ng$CSREF)] <- cs.2022.5$y.2023
+CS.ng$y.2024[match(cs.2022.5$CSREF,  CS.ng$CSREF)] <- cs.2022.5$y.2024
+}
+
+
+
+#> 15. Agreements starting in 22 running for 10 years 
+cs.2022.10 <- CS.ng %>%
+  select(CSREF, STARTDATE.2, Years, y.2016, y.2017, y.2018, y.2019, y.2020, y.2021, y.2022, y.2023, y.2024) %>% 
+  filter(STARTDATE.2 >= as.Date("2022-01-01") & STARTDATE.2 <= as.Date("2022-12-31") & Years == 10)
+#> If data frame has no observations skip the subsequent updating of main CS.ng table columns
+if (dim(cs.2022.10)[1] != 0) {
+#> Update relevant cols
+cs.2022.10$y.2022 = 1
+cs.2022.10$y.2023 = 1
+cs.2022.10$y.2024 = 1
+# Update main CS.ng table with data from agreement subset group
+CS.ng$y.2022[match(cs.2022.10$CSREF,  CS.ng$CSREF)] <- cs.2022.10$y.2022
+CS.ng$y.2023[match(cs.2022.10$CSREF,  CS.ng$CSREF)] <- cs.2022.10$y.2023
+CS.ng$y.2024[match(cs.2022.10$CSREF,  CS.ng$CSREF)] <- cs.2022.10$y.2024
+}
+
+
+
+# Remove records where average annual cost id "unavailable"
+CS.final <- CS.ng[!(CS.ng$AVGANNCOST=="*Unavailable"),]
+
+
+
+# Export final raw data table
+write_csv(CS.final, here("Out", "AES", "CS", "Nat_Park", "CSV", paste0("CS_", active_park, "_Raw_Processed.csv")))
+
+# # Export final raw data table - TESTING
+# write_csv(CS.final, here("Out", "AES", "CS", "County", "CSV", paste0("CS__Raw_Processed_Test.csv")))
+
+
+
+# Change annual cost column to numerical
+CS.final$AVGANNCOST <- as.numeric(CS.final$AVGANNCOST)
+CS.final$AVGANNCOST <- round(CS.final$AVGANNCOST, 2)
+
+
+#> Calculate annual costs
+#> Total for 2018
+CS.2018.Total <- CS.final %>% 
+  filter(y.2018 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2018 <- sum(CS.2018.Total$AVGANNCOST)
+
+#> Total for 2019
+CS.2019.Total <- CS.final %>% 
+  filter(y.2019 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2019 <- sum(CS.2019.Total$AVGANNCOST)
+
+
+#> Total for 2020
+CS.2020.Total <- CS.final %>% 
+  filter(y.2020 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2020 <- sum(CS.2020.Total$AVGANNCOST)
+
+
+#> Total for 2021
+CS.2021.Total <- CS.final %>% 
+  filter(y.2021 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2021 <- sum(CS.2021.Total$AVGANNCOST)
+
+#> Total for 2022
+CS.2022.Total <- CS.final %>% 
+  filter(y.2022 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2022 <- sum(CS.2022.Total$AVGANNCOST)
+
+#> Total for 2023
+CS.2023.Total <- CS.final %>% 
+  filter(y.2023 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2023 <- sum(CS.2023.Total$AVGANNCOST)
+
+#> Total for 2024
+CS.2024.Total <- CS.final %>% 
+  filter(y.2024 == 1) %>% 
+  select(AVGANNCOST)
+#> Variable to hold total sumemd value for year
+CS.sum.2024 <- sum(CS.2024.Total$AVGANNCOST)
+
+
+#> Create data frame of annual costs
+CS_Summary <- as.matrix(data.frame(Total_2018 = numeric(0), Total_2019 = numeric(0), Total_2020 = numeric(0), Total_2021 = numeric(0), Total_2022 = numeric(0), Total_2023 = numeric(0), Total_2024 = numeric(0)))
+totals.cs <- c(CS.sum.2018, CS.sum.2019, CS.sum.2020, CS.sum.2021, CS.sum.2022, CS.sum.2023, CS.sum.2024)
+#> Insert figure for 2018
+df2 <- miscTools::insertRow(CS_Summary, 1, totals.cs)
+df2 <- as.data.frame(df2)
+
+#> Print table district.summary on web page
+print(knitr::kable(df2, caption = paste0("Table 4.6.", i , " ", "CS payments - ",  active_park)))
+
+#> Make long
+df2.plot <- melt(df2)
+#> Extract year from string
+names(df2.plot)[1]<-paste("Year")
+names(df2.plot)[2]<-paste("Value_cs")
+df2.plot$Year <- sub("^.*([0-9]{4}).*", "\\1", df2.plot$Year)
+
+# Simple bar chart
+plot.cs <- ggplot(df2.plot, aes(x=Year, y=Value_cs)) + 
+  geom_bar(stat = "identity", fill="#e38d0b", width = 0.6) +
+  theme_bw() +
+  labs(title = paste0("Countryside Stewardship payments: ", active_park), x = "Year", y = "Value (£)") +
+  geom_text(aes(label= paste0(round(Value_cs / 1000000, digits = 2), " M")), vjust = 1.5, colour = "white", size = 3.5) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 16, b = 0, l = 0))) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(legend.position="none") +
+  scale_y_continuous(labels = unit_format(unit = "M", scale = 1e-6))
+plot.cs
+print(plot.cs)
+
+
+#> Export the plot
+ggsave(here("Out", "AES", "CS", "Nat_Park", "Plot", paste0("CS_payments_", active_park, ".png")), width = 7, height = 5)
+
+# #> Export the plot - TESTING
+# ggsave(here("Out", "AES", "CS", "County", "Plot", paste0("CS_payments_County_Test.png")), width = 7, height = 5)
+
+
+#Export table
+write_csv(df2, here("Out", "AES", "CS", "Nat_Park", "CSV", paste0("CS_payments_", active_park, ".csv")))
+
+
+# #Export table - TESTING
+# write_csv(df2, here("Out", "AES", "CS", "County", "CSV", "CS_payments_County_Test.csv"))
+
+}
+
+
+
+```
+<br />
+
+
+### 4.7 AES Claimant numbers
+
+Calculating the number of AES claimants in each county (February 2022 data - Natural England)
+
+<br />
+
+
+#### Environmental Stewardship
+
+
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+
+#> Create a summary table that will be populated by for loop below
+ES.claimants <- data.frame(County=as.character(), Claimants=as.numeric())
+
+i <- 0
+#> Initiate loop
+for(active_county in counties){
+  
+#> Loop counter (for table caption number)
+i <- i+1
+
+#> Get a boundary shapefile for the active county
+target_county <- counties.sw |>
+  filter(NAME == active_county)
+
+#> Intersect with target county polygon
+int <- st_intersection(ES, target_county)
+
+#> Create non-geom version 
+ES.ng <- int
+st_geometry(ES.ng) <- NULL
+
+
+df.ES.claim <- ES.ng |> 
+  mutate(County = active_county) |> 
+  select(County) |> 
+  group_by(County) |> 
+  summarise(Claimants = n())
+
+#> add total to 
+ES.claimants <- rbind(ES.claimants, df.ES.claim)
+
+int <- NULL
+df.ES.claim <- NULL
+
+}
+
+#> Print table on web page
+print(knitr::kable(ES.claimants, caption = "Table 4.6.1  No. of ES claimants by county"))
+
+#> Export table
+write_csv(ES.claimants, here("Out", "Claimants", "CSV", "ES_Claimants_by_County.csv"))
+
+
+```
+
+<br />
+<br />
+
+
+#### Countryside Stewardship
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+
+#> Create a summary table that will be populated by for loop below
+CS.claimants <- data.frame(County=as.character(), Claimants=as.numeric())
+
+i <- 0
+#> Initiate loop
+for(active_county in counties){
+  
+#> Loop counter (for table caption number)
+i <- i+1
+
+#> Get a boundary shapefile for the active county
+target_county <- counties.sw |>
+  filter(NAME == active_county)
+
+#> Intersect with target county polygon
+int <- st_intersection(CS, target_county)
+
+#> Create non-geom version 
+CS.ng <- int
+st_geometry(CS.ng) <- NULL
+
+
+df.CS.claim <- CS.ng |> 
+  mutate(County = active_county) |> 
+  select(County) |> 
+  group_by(County) |> 
+  summarise(Claimants = n())
+
+#> add total to 
+CS.claimants <- rbind(CS.claimants, df.CS.claim)
+
+int <- NULL
+df.CS.claim <- NULL
+
+}
+
+#> Print table on web page
+print(knitr::kable(CS.claimants, caption = "Table 4.6.2  No. of CS claimants by county"))
+
+#> Export table
+write_csv(CS.claimants, here("Out", "Claimants", "CSV", "CS_Claimants_by_County.csv"))
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<br />
+
+
+## 5. Agri land proportions calcs
+
+<br />
+
+Summary of Corine agricultural land cover types (all) by county
+
+
+```{r echo=TRUE, eval=TRUE, results='asis', fig.height = 6, fig.width = 9}
+
+# #> Get corine agri data (pre-clipped to South West in QGIS
+agri.land <- corine.sw
+#> Get land class description from lookup
+#> Get LUT
+corine.LUT <- read_csv(here("In", "Shape", "clc_legend.csv"))
+#> Add agri land class desciption based on LUT
+agri.land <- merge(agri.land, corine.LUT, by.x = "CODE_18", by.y = "CLC_CODE", all.x = TRUE)
+#> Set CRS
+agri.land.bng <- st_transform(agri.land, 27700)
+#> Intersect by county then calc areas then summarise
+int.land <- st_intersection(agri.land.bng, counties.sw)
+#> Reduce table
+int.land <- int.land |> 
+  select(ID, GRID_CODE, Landcover_class, LABEL3, NAME)
+#> Area calc
+int.land$area <- st_area(int.land)
+#> Remove geom
+st_geometry(int.land) <- NULL
+#> Convert area to KM2
+int.land$area <- set_units(int.land$area, km^2)
+int.land$area <- round(int.land$area, digits = 3)
+
+#> Group by county and summarise
+corine.stats <- int.land |> 
+  group_by(NAME, LABEL3) |> 
+  summarise(Area_KM2 = sum(area)) |> 
+  ungroup() |> 
+  mutate(row = row_number()) |> 
+  pivot_wider(id_cols = -row, names_from = NAME, values_from = Area_KM2) |> 
+  rename(Land_Cover_Type = LABEL3)
+#> Change values to numeric
+corine.stats[, 2:5] <- lapply(corine.stats[, 2:5], as.numeric)
+#> Change NAs to zero
+corine.stats[is.na(corine.stats)] <- 0
+
+
+#> Print table on web page
+print(knitr::kable(corine.stats, caption = "Table 5.1 Agricultural land area classes (KM2) by county"))
+
+
+#Export table
+write_csv(corine.stats, here("Out", "Corine", "CSV", "Corine_agri_area_by_county.csv"))
+
+
+
+```
