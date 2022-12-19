@@ -1,0 +1,24 @@
+( TITLE-ABS-KEY ( {geographic* information} ) OR 
+TITLE-ABS-KEY ( {geoinformation} ) OR 
+TITLE-ABS-KEY ( {geo-information} ) OR 
+TITLE-ABS-KEY ( {geo-spatial} ) OR 
+TITLE-ABS-KEY ( {geospatial} ) OR 
+TITLE-ABS-KEY ( {spatial data} ) OR 
+TITLE-ABS-KEY ( {geodata} ) OR 
+TITLE-ABS-KEY ( {geo-data} ) OR 
+TITLE-ABS-KEY ( {giscience} ) OR 
+TITLE-ABS-KEY ( {GIS} ) OR 
+TITLE-ABS-KEY ( {G.I.S} ) OR 
+TITLE-ABS-KEY ( {spatial analysis} ) OR 
+TITLE-ABS-KEY ( {gi-science} ) AND 
+LANGUAGE ( english ) ) AND 
+PUBYEAR > 1969 AND PUBYEAR < 2022 OR 
+TITLE-ABS-KEY ({geographic* data}) OR 
+SRCTITLE(International Journal of Geographical Information Science) OR 
+SRCTITLE(Transactions in GIS) OR 
+SRCTITLE(Journal of Spatial Information Science) OR 
+SRCTITLE(GeoInformatica) AND
+( LIMIT-TO ( SRCTYPE,"j" ) ) AND 
+( LIMIT-TO ( PUBSTAGE,"final" ) ) AND 
+( LIMIT-TO ( DOCTYPE,"ar" ) ) AND 
+( LIMIT-TO ( LANGUAGE,"English" ) )
