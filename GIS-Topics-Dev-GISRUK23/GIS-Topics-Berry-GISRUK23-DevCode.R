@@ -1,0 +1,1341 @@
+
+#> Code for the GISRUK 2023 submission "Visualising the evolution of GIS research using bibliographic data" by Berry et al (2023)
+#> Note this code is in development
+#> The final code plus a Quarto website will be made availabel on publication of the full journal paper
+#> contact rberry@glos.ac.uk for further info
+
+
+
+#> Load libraries
+#> #> General/data processing
+library(tidyverse) # Tidy data science
+library(here) # Relative path management
+library(tictoc) # Timing functions 
+library(knitr) # Rendering tables in html
+
+#> Working with strings
+library(stringi) # String manipulation
+library(tm) #> Text mining
+
+#> Geographical analysis
+library(sf) # Processing 'simple features' (i.e. geospatial vector data)
+library(rnaturalearth) # World map spatial vector data
+library(rnaturalearthdata) # Natural Earth data
+
+#> Topic modelling
+library(stm) # structural topic modelling
+library(furrr) # parallel processing (used for the computatially intensive stms)
+library(tidytext) # Converting STMs to tidy format
+
+#> Plotting
+library(ggforce) # functions to export facet plots as multiple pages
+
+
+
+#> Create a list of input files (i.e. bibliographic CSVs exported from Scopus)
+fold.in <- here("In", "Scopus-CSV")
+#> Set timer for function
+tictoc::tic("timer.1.import")
+#> List input CSVs, read-in, and bind togather into a single table
+bib <- list.files(fold.in, include.dirs = F, full.names = T, recursive = T) |> 
+  purrr::map(read_csv) |> 
+  dplyr::bind_rows()
+#> Drop "fold.in" variable
+rm(fold.in)
+#> Export "raw" input data as CSV
+write_csv(bib, here("In", "Scopus-Raw-All.csv"))
+#> End timer
+toc()
+
+
+
+#> Select only relevant columns, remove any duplicates, 
+bib <- bib |> 
+  select(Year, Titles, Abstract, `Source title`, `Indexed Keywords`, `Author Keywords`, Affiliations, `Language of Original Document`, `Cited by`, EID) |> 
+  rename(Title = Titles, Lang_Orig = `Language of Original Document`, KW_Author = `Author Keywords`, KW_Indexed = `Indexed Keywords`, Source = `Source title`, Cited = `Cited by`)|> 
+  distinct() |> 
+  arrange(Year)
+
+
+#> REMOVE RECORDS BASED ON SPECIFIC SEARCH TERMS AND JOURNALS
+
+#> USING SPECIFIC SEARCH TERMS
+#> Import CSV containing list of terms to remove (mostly related to switchgear and medical imaging/physics)
+df.rmv.trm <- read_csv(here("In", "Terms", "Terms_2_remove.csv"))
+#> Create character string of terms
+str.rmv.trm <- as.character(trimws(df.rmv.trm$Term))
+#> Add regex 'word boundaries' around search terms so that only exact terms are found
+str.rmv.trm <-paste0('\\b',str.rmv.trm,'\\b')
+#> Add the | operator to the string to peform a vectorised search using 'str_detect'
+qry.rmv.trm <- str.rmv.trm |> 
+  paste(collapse = "|")
+#> Convert string to regular expression and set to ignore case
+qry.rmv.trm <- regex(qry.rmv.trm, ignore_case = TRUE)
+#> Create data frame of records returned from term search - searching Title, Abstract, and both keyword columns
+tib.rmv.trm <- bib |> 
+  filter(str_detect(Title, qry.rmv.trm) | str_detect(Abstract, qry.rmv.trm) | str_detect(KW_Indexed, qry.rmv.trm) | str_detect(KW_Author, qry.rmv.trm))
+#> Pefrom an anti-join with the main "bib" table to remove these records
+bib.clean <- anti_join(bib, tib.rmv.trm)  
+
+
+
+#> USING SPECIFIC JOURNALS
+#> Import CSV containing list of journals to remove (mostly related to medical imaging/physics)
+df.rmv.jrnl <- read_csv(here("In", "Journals", "Journals_2_remove.csv"))
+#> Create character string of journal names
+str.rmv.jrnl <- as.character(df.rmv.jrnl$Journal_Name)
+#> Add regex start and end anchors around journal names 
+str.rmv.jrn <-paste0('^',str.rmv.jrnl,'$')
+# str.rmv.jrn <-paste0('\\b',str.rmv.jrnl,'\\b')
+#> Add the | operator to the string to peform a vectorised search using 'str_detect'
+qry.rmv.jrnl <- str.rmv.jrnl |> 
+  paste(collapse = "|")
+#> Create data frame of records returned from journal search - searching Title, Abstract, and both keyword columns
+tib.rmve.jrnl <- bib.clean |> 
+  filter(str_detect(Source, qry.rmv.jrnl))
+#> Pefrom an anti-join with the main "bib.cean" table to remove these records
+bib.clean <- anti_join(bib.clean, tib.rmve.jrnl)
+#> Remove records where "Source" = "NA" (i.e. paper from unknown journals)
+bib.clean <- bib.clean[!is.na(bib.clean$Source), ]
+
+
+
+
+
+#> Create a list of unique journals names and sumamrise by count -  to check for possible irrelevant journals (i.e. those focussed on medical imaging/surgery that contain references to spatial data but are not GIS-focussed)
+#> REMOVE SPECIFC TERMS FROM "Abstract" text note: eliminating only the words/strings not the records
+#> Mainly these are words that refer to publishers and copyright info
+
+#> Import CSV containing list of terms to remove from abstract text
+df.rmv.trmOnly <- read_csv(here("In", "Terms", "TermsOnly2Remove.csv"))
+#> Create character string of terms
+str.rmv.trmOnly <- as.character(trimws(df.rmv.trmOnly$Term))
+#> Add regex 'word boundaries' around search terms so that only exact terms are found
+str.rmv.trmOnly <- paste0('\\b',str.rmv.trmOnly,'\\b')
+#> Add the | operator to the string to peform a vectorised search using 'str_detect'
+str.rmv.trmOnly <- str.rmv.trmOnly |> 
+  paste(collapse = "|")
+#> Convert string to regular expression and set to ignore case
+str.rmv.trmOnly <- regex(str.rmv.trmOnly, ignore_case = TRUE)
+
+#> Create new temporary abstract column with target words removed
+bib.clean$Abstract2 <- tm::removeWords(bib.clean$Abstract, str.rmv.trmOnly)
+
+#> Replace "Abstract" text with "Abstract2" (strings removed) text
+bib.clean$Abstract <- bib.clean$Abstract2
+#> Delete "Abstract2"
+bib.clean$Abstract2 <- NULL
+
+#> Create a series of samples to check data and add new journal/text terms for exclusion, as required
+#> Set sample seed
+sample.seed <- seq(1, 100, 1) # 100 samples
+#> Function to generate samples
+fun_samples <- function(x){
+  sample <- dplyr::slice_sample(bib.clean, n = 500)
+}
+#> Run function, creating list
+lst.samples <- map(sample.seed, fun_samples)
+#> View selected samples
+view(lst.samples[14])
+
+#> Update main 'bib' table with cleaned version
+bib <- bib.clean
+
+#> Clean Env: Remove everything from the environment except the main 'bib' table
+rm(list = setdiff(ls(), "bib"))
+
+
+
+#> Create a data frame of number of publications by year
+pbs.yr <- bib |> 
+  group_by(Year) |> 
+  filter(!is.na(Year)) |>
+  summarise(n= n())
+
+#> Plot as bar chart
+plt.pbs.yr <- pbs.yr |> 
+  ggplot(aes(x=Year, y=n)) +
+  # geom_line(size = 1.5, color = "blue") +
+  # geom_point(size= 4, colour = "blue") +
+  geom_bar(stat = 'identity', fill = "#2c66b8") +
+  labs(title = paste0("Published GIS Research Papers: ", min(pbs.yr$Year), " to ",  max(pbs.yr$Year), "  (n = ", nrow(bib), ")"), x = "Year", y = "No. of articles ") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 12, b = 0, l = 0))) +
+  scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3), breaks = seq(0, max(pbs.yr$n), by = 1000), expand = c(0.01, 0)) +
+  scale_x_continuous(breaks = seq(min(pbs.yr$Year), max(pbs.yr$Year), by = 5)) +
+  theme(legend.position="none") +
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        # explicitly set the horizontal lines (or they will disappear too)
+        panel.grid.major = element_line( size=.1, color="gray"))
+# Export plot
+ggsave(here("Out", "1_Descriptive_Stats", "Plots", "Plot1_Pubs_by_Year_ALL.png"), width = 7, height = 5)
+#> Render on output page
+print(plt.pbs.yr) 
+
+
+#> Create grouped summary table of papers by citation count
+cits.pprs <- bib |> 
+  select(Title, Source, Year, Cited) |> 
+  arrange(desc(Cited))
+cits.pprs$UID <- seq.int(nrow(cits.pprs))
+#> Export as CSV
+write_csv(cits.pprs, here("Out", "1_Descriptive_Stats", "Tables", "1_Papers-Citations.csv"))
+#> Render on web page
+#> Get top 10 paper
+cits.pprs.10 <- cits.pprs |> 
+  dplyr::slice_max(Cited, n = 10) |> 
+  select(-UID)
+
+
+#> Data science
+df.dtSci <- read_csv(here("In", "Software", "DataScience.csv"))
+#> Create character string of terms
+str.dtSci <- as.character(trimws(df.dtSci$Term))
+#> Add regex 'word boundaries' around search terms so that only exact terms are found
+str.dtSci <-paste0('\\b',str.dtSci,'\\b')
+#> Add the | operator to the string to peform a vectorised search using 'str_detect'
+qry.dtSci <- str.dtSci |> 
+  paste(collapse = "|")
+#> Convert string to regular expression and set to ignore case
+qry.dtSci <- regex(qry.dtSci, ignore_case = TRUE)
+#> Create data frame of records returned from term search - searching Title, Abstract, and both keyword columns
+tib.dtSci <- bib |> 
+  filter(str_detect(Title, qry.dtSci)| str_detect(Abstract, qry.dtSci) | str_detect(KW_Indexed, qry.dtSci) | str_detect(KW_Author, qry.dtSci)) |> 
+  group_by(Year) |>
+  summarise(count=n()) 
+
+
+#> PROPRIETARY SOFTWARE
+df.sftPrp <- read_csv(here("In", "Software", "Software-Proprietary.csv"))
+#> Create character string of terms
+str.sftPrp <- as.character(trimws(df.sftPrp$Software))
+#> Add regex 'word boundaries' around search terms so that only exact terms are found
+str.sftPrp <-paste0('\\b',str.sftPrp,'\\b')
+#> Add the | operator to the string to peform a vectorised search using 'str_detect'
+qry.sftPrp <- str.sftPrp |> 
+  paste(collapse = "|")
+#> Convert string to regular expression and set to ignore case
+qry.sftPrp <- regex(qry.sftPrp, ignore_case = TRUE)
+#> Create data frame of records returned from term search - searching Title, Abstract, and both keyword columns
+tib.sftPrp <- bib |> 
+  filter(str_detect(Title, qry.sftPrp)| str_detect(Abstract, qry.sftPrp) | str_detect(KW_Indexed, qry.sftPrp) | str_detect(KW_Author, qry.sftPrp)) |> 
+  group_by(Year) |>
+  summarise(count=n()) |> 
+  mutate(Type = "Proprietary")
+#> Merge with "pbs.yr" data frame to calculate instances as a proportion of overall papers per year
+tib.sftPrp.m <- merge(tib.sftPrp, pbs.yr, by = "Year", all.x = TRUE)
+#> Change column name of "n" to "Total_Pubs)
+tib.sftPrp.m <- tib.sftPrp.m  |> 
+  rename(Total_Pubs = n) |> 
+  mutate(Proportion = count / Total_Pubs * 100)
+
+
+#> OPEN SOURCE SOFTWARE
+df.sftOS <- read_csv(here("In", "Software", "Software-OpenSource.csv"))
+#> Create character string of terms
+str.sftOS <- as.character(trimws(df.sftOS$Software))
+#> Add regex 'word boundaries' around search terms so that only exact terms are found
+str.sftOS <-paste0('\\b',str.sftOS,'\\b')
+#> Add the | operator to the string to peform a vectorised search using 'str_detect'
+qry.sftOS <- str.sftOS |> 
+  paste(collapse = "|")
+#> Convert string to regular expression and set to ignore case
+qry.sftOS <- regex(qry.sftOS, ignore_case = TRUE)
+#> Create data frame of records returned from term search - searching Title, Abstract, and both keyword columns
+tib.sftOS <- bib |>
+  filter(str_detect(Title, qry.sftOS)| str_detect(Abstract, qry.sftOS) | str_detect(KW_Indexed, qry.sftOS) |   str_detect(KW_Author, qry.sftOS))|> 
+  group_by(Year) |>
+  summarise(count=n()) |> 
+  mutate(Type = "Open source")
+#> Merge with "pbs.yr" data frame to calculate instances as a proportion of overall papers per year
+tib.sftOS.m <- merge(tib.sftOS, pbs.yr, by = "Year", all.x = TRUE)
+#> Change column name of "n" to "Total_Pubs)
+tib.sftOS.m <- tib.sftOS.m  |> 
+  rename(Total_Pubs = n) |> 
+  mutate(Proportion = count / Total_Pubs * 100)
+#> Combine data frames
+df.software <- rbind(tib.sftPrp.m, tib.sftOS.m)
+df.software <- df.software |> 
+  filter(Year >=1990)
+
+#> Line plot proprietary software vs. open software
+df.software$Type <- factor(df.software$Type, levels=c("Proprietary", "Open source"), labels=c("Proprietary", "Open source"))
+p.open.1 <- df.software |> 
+  ggplot(aes(x=Year, y=Proportion, group=Type, color=Type)) +
+  geom_line(size = 1.5) +
+  theme_bw() +
+  labs(title = "GIS software: proprietary vs. open-source" , x = "Year", y = "Proportion of total papers per year (%)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 12, b = 0, l = 0))) +
+  theme(legend.title=element_blank()) +
+  scale_color_discrete(name="") + # remove legend title +
+  # scale_x_continuous(breaks = seq(min(df.software$Year), max(df.software$Year), by = 5))
+  scale_x_continuous(breaks = seq(1990, 2021, by = 5)) 
+ggsave(here("Out", "1_Descriptive_Stats", "Plots", "Plot_Open_vs_Proprietary.png"), width = 7, height = 5)
+p.open.1
+
+
+#> COVID/CORONAVIRUS
+df.disease <- read_csv(here("In", "Exploratory_terms", "disease.csv"))
+#> Create character string of terms
+str.disease <- as.character(trimws(df.disease$Term))
+#> Add regex 'word boundaries' around search terms so that only exact terms are found
+str.disease<-paste0('\\b',str.disease,'\\b')
+#> Add the | operator to the string to peform a vectorised search using 'str_detect'
+qry.disease <- str.disease|> 
+  paste(collapse = "|")
+#> Convert string to regular expression and set to ignore case
+qry.disease<- regex(qry.disease, ignore_case = TRUE)
+#> Create data frame of records returned from term search - searching Title, Abstract, and both keyword columns
+tib.disease <- bib |>
+  filter(str_detect(Title, qry.disease)| str_detect(Abstract, qry.disease) | str_detect(KW_Indexed, qry.disease) |   str_detect(KW_Author, qry.disease))|> 
+  group_by(Year) |>
+  summarise(count=n()) 
+#> Merge with "pbs.yr" data frame to calculate  as a proportion of overall papers per year
+tib.disease.m <- merge(tib.disease, pbs.yr, by = "Year", all.x = TRUE)
+#> Calculate as proportion of pubs per year
+tib.disease.m <- tib.disease.m |> 
+  rename(Total_Pubs = n) |> 
+  mutate(Proportion = count / Total_Pubs * 100)
+
+#> Plot
+p.disease <- tib.disease.m |> 
+  ggplot(aes(x=Year, y=count)) +
+  geom_line(size = 1.5, colour = "red") +
+  theme_bw() +
+  labs(title = "Term frequencies: 'Coronavirus' and 'Covid'" , x = "Year", y = "Number of papers") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 12, b = 0, l = 0))) +
+  scale_color_manual(values=c("#00FF00")) + # remove legend title
+  scale_x_continuous(breaks = seq(min(tib.disease.m$Year - 4), max(tib.disease.m$Year), by = 5))
+ggsave(here("Out", "1_Descriptive_Stats", "Plots", "Plot_Covid.png"), width = 7, height = 5)
+p.disease 
+
+
+#> AI AND MACHINE LEARNING
+df.ml_ai <- read_csv(here("In", "Exploratory_terms", "ai_ml.csv"))
+#> Create character string of terms
+str.ml_ai <- as.character(trimws(df.ml_ai$Term))
+#> Add regex 'word boundaries' around search terms so that only exact terms are found
+str.ml_ai<-paste0('\\b',str.ml_ai,'\\b')
+#> Add the | operator to the string to peform a vectorised search using 'str_detect'
+qry.ml_ai <- str.ml_ai|> 
+  paste(collapse = "|")
+#> Convert string to regular expression and set to ignore case
+qry.ml_ai<- regex(qry.ml_ai, ignore_case = TRUE)
+#> Create data frame of records returned from term search - searching Title, Abstract, and both keyword columns
+tib.ml_ai <- bib |>
+  filter(str_detect(Title, qry.ml_ai)| str_detect(Abstract, qry.ml_ai) | str_detect(KW_Indexed, qry.ml_ai) |   str_detect(KW_Author, qry.ml_ai))|> 
+  group_by(Year) |>
+  summarise(count=n()) 
+#> Merge with "pbs.yr" data frame to calculate  as a proportion of overall papers per year
+tib.ml_ai.m <- merge(tib.ml_ai, pbs.yr, by = "Year", all.x = TRUE)
+#> Calculate as proportion of pubs per year
+tib.ml_ai.m <- tib.ml_ai.m |> 
+  rename(Total_Pubs = n) |> 
+  mutate(Proportion = count / Total_Pubs * 100)
+
+#> Plot
+p.ml_ai <- tib.ml_ai.m |> 
+  ggplot(aes(x=Year, y=count)) +
+  geom_line(size = 1.5, colour = "blue") +
+  theme_bw() +
+  labs(title = "Term frequencies: 'Machine learning' and 'artificial intelligence'" , x = "Year", y = "Number of papers") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 12, b = 0, l = 0))) +
+  scale_color_manual(values=c("#00FF00")) + # remove legend title
+  scale_x_continuous(breaks = seq(min(tib.ml_ai.m$Year - 4), max(tib.ml_ai.m$Year), by = 5))
+ggsave(here("Out", "1_Descriptive_Stats", "Plots", "Plot_ml_ai.png"), width = 7, height = 5)
+p.ml_ai
+
+
+#> Remove everything from the environment apart from 'bib' table
+rm(list = setdiff(ls(), "bib"))
+
+
+#> Extract country from "Affiliations" column string (Scopus confirmed that first author is first in affiliation string - also tested this with a sample of papers)
+bib$Addr_FirstAuth <- stringi::stri_extract(bib$Affiliations, regex='[^;]*') 
+#> Country is almost always the last word in the AFFILIATION_1 string - extract to new column "Country_raw"
+bib$Country_Raw <- stringr::str_extract(bib$Addr_FirstAuth, '\\b[^,]+$')
+#> Remove full stops (and any other punctuation) from the new COUNTRY column -->
+bib$Country_Raw <-  str_replace_all(bib$Country_Raw, "[[:punct:]]", "")
+#> Tidy strings for individual countries
+#> New column to store final processed country name strings (keep original bib.raw$COUNTRY for reference) 
+bib$Country <- bib$Country_Raw
+#> Get a list of unique country names (sort in alphabetical order)
+bib.cntry.uni <- as_tibble(unique(bib$Country)) |> 
+  arrange(-desc(value))
+
+#> Generate a spatial polygons (sf) layer for world countries from the rnaturalearth package
+countries.ne <- rnaturalearth::ne_countries(scale = 50, returnclass = "sf")
+#> Tidy countries table- renaming selecting only target "admin" column and renaming it "name" (i.e. country name)
+countries.ne <- countries.ne |> 
+  select(admin) |> 
+  rename(name = admin)
+#> Get unique country names from Natural Earth data as a non spatial table
+countries.ne.uni <- countries.ne 
+st_geometry(countries.ne.uni) <- NULL
+countries.ne.uni <- as_tibble(unique(countries.ne.uni$name))
+#> Create uppercase version of ne countries (so that ne and bib countries in same format)
+countries.ne$nameUpper <- toupper(countries.ne$name)
+
+
+#> Tackle "problem" strings by country - "change bib.countries.uni" names to match Natural Earth data "countries.ne.uni" names. Put updated country name into new column "Country2"
+#> Use the "anti.j.countries" anti-join (below) to show records in bib$Country that aren't matching with country names in "countries.ne"
+#> USA (contains zipcodes that need to be removed - delete all in string that is not "USA")
+#> USA (contains zipcodes that need to be removed - delete all in string that is not "USA")
+bib$Country[grep("USA", bib$Country_Raw, ignore.case = TRUE)] <- "United States of America"
+bib$Country[grep("United States", bib$Country_Raw, ignore.case = TRUE)] <- "United States of America"
+#> China 
+bib$Country[grep("Peoples R China", bib$Country_Raw, ignore.case = TRUE)] <- "China"
+bib$Country[grep("PR China", bib$Country_Raw, ignore.case = TRUE)] <- "China"
+#> Individual UK countries (e.g. England, Wales,... need to be assigned to "UK")
+#> England
+bib$Country[grep("England", bib$Country_Raw, ignore.case = TRUE)] <- "United Kingdom"
+bib$Country[grep("Engl", bib$Country_Raw, ignore.case = TRUE)] <- "United Kingdom"
+bib$Country[grep("University College London", bib$Country_Raw, ignore.case = TRUE)] <- "United Kingdom"
+#> Wales
+bib$Country[grep("Wales", bib$Country_Raw, ignore.case = TRUE)] <- "United Kingdom"
+#> Scotland
+bib$Country[grep("Scotland", bib$Country_Raw, ignore.case = TRUE)] <- "United Kingdom"
+#> Northern Ireland
+bib$Country[grep("Northern Ireland", bib$Country_Raw, ignore.case = TRUE)] <- "United Kingdom"
+bib$Country[grep("North Ireland", bib$Country_Raw, ignore.case = TRUE)] <- "United Kingdom"
+#> UK
+bib$Country[grep("UK", bib$Country_Raw, ignore.case = TRUE)] <- "United Kingdom"
+#> Russia
+bib$Country[grep("Russian Federation", bib$Country_Raw, ignore.case = TRUE)] <- "Russia"
+bib$Country[grep("USSR", bib$Country_Raw, ignore.case = TRUE)] <- "Russia"
+#> Vietnam
+bib$Country[grep("Viet Nam", bib$Country_Raw, ignore.case = TRUE)] <- "Vietnam"
+#> North Macedonia
+bib$Country[grep("North Macedonia", bib$Country_Raw, ignore.case = TRUE)] <- "Macedonia"
+#> Syria
+bib$Country[grep("Syrian Arab Republic", bib$Country_Raw, ignore.case = TRUE)] <- "Syria"
+#> Canada
+bib$Country[grep("Can", bib$Country_Raw, ignore.case = TRUE)] <- "Canada"
+bib$Country[grep("University of Waterloo", bib$Country_Raw, ignore.case = TRUE)] <- "Canada"
+#> Macao
+bib$Country[grep("Macao", bib$Country_Raw, ignore.case = TRUE)] <- "Macao S.A.R"
+#> United Arab Emirates (change from "U Arab Emirates" to "U Arab Emirates")
+bib$Country[grep("U Arab Emirates", bib$Country_Raw, ignore.case = TRUE)] <- "United Arab Emirates"
+#> Tanzania (change from "Tanzania" to "United Republic of Tanzania")
+bib$Country[grep("Tanzania", bib$Country_Raw, ignore.case = TRUE)] <- "United Republic of Tanzania"
+#> Bosnia (change from "Bosnia  Herceg" to "Bosnia and Herzegovina")
+bib$Country[grep("Bosnia  Herceg", bib$Country_Raw, ignore.case = TRUE)] <- "Bosnia and Herzegovina"
+#> Serbia (change from "Serbia Monteneg" to "Serbia")
+bib$Country[grep("Serbia Monteneg", bib$Country_Raw, ignore.case = TRUE)] <- "Serbia"
+#> Serbia (change from "Serbia" to "Republic of Serbia")
+bib$Country[grep("Serbia", bib$Country_Raw, ignore.case = TRUE)] <- "Republic of Serbia"
+#> Trinidad and Tobago (change from "Trinidad Tobago" to "Trinidad and Tobago")
+bib$Country[grep("Trinidad Tobago", bib$Country_Raw, ignore.case = TRUE)] <- "Trinidad and Tobago"
+#> Papua New Guinea (change from "Papua N Guinea" to "Papua New Guinea)
+bib$Country[grep("Papua N Guinea", bib$Country_Raw, ignore.case = TRUE)] <- "Papua New Guinea"
+#> Ivory Coast (change from "Cote Ivoire" to "Ivory Coast")
+bib$Country[grep("Cote Ivoire", bib$Country_Raw, ignore.case = TRUE)] <- "Ivory Coast"
+bib$Country[grep("Cote Divoire", bib$Country_Raw, ignore.case = TRUE)] <- "Ivory Coast"
+#> French Guiana (change from "French Guiana" to "France")
+bib$Country[grep("French Guiana", bib$Country_Raw, ignore.case = TRUE)] <- "France"
+#> Falkland Islands (change from "Falkland Island" to "United Kingdom")
+bib$Country[grep("Falkland Island", bib$Country_Raw, ignore.case = TRUE)] <- "United Kingdom"
+#> Germnay (change from "FED REP GER" to "GERMANY")
+bib$Country[grep("FED REP GER", bib$Country_Raw, ignore.case = TRUE)] <- "FED REP GER"
+#> 	ESWATINI (change from "ESWATINI" to "Swaziland"
+bib$Country[grep("ESWATINI", bib$Country_Raw, ignore.case = TRUE)] <- "Swaziland"
+#> 	DEM REP CONGO (change from "Democratic Republic Congo" to "Democratic Republic of the Congo"
+bib$Country[grep("Democratic Republic Congo", bib$Country_Raw, ignore.case = TRUE)] <- "Democratic Republic of the Congo"
+#> 	GER DEM REP (change from "GER DEM REP" to "Germany"
+bib$Country[grep("GER DEM REP", bib$Country_Raw, ignore.case = TRUE)] <- "Germany"
+bib$Country[grep("West Ger", bib$Country_Raw, ignore.case = TRUE)] <- "Germany"
+#> 	FED REP GER (change from "GFED REP GER" to "Germany"
+bib$Country[grep("FED REP GER", bib$Country_Raw, ignore.case = TRUE)] <- "Germany"
+#> 	HONG KONG (change from "HONG KONG" to "Hong Kong S.A.R."
+bib$Country[grep("HONG KONG", bib$Country_Raw, ignore.case = TRUE)] <- "Hong Kong S.A.R."
+#> 	Libya
+bib$Country[grep("Libyan Arab Jamahiriya", bib$Country_Raw, ignore.case = TRUE)] <- "Libya"
+#> 	Brunei
+bib$Country[grep("Brunei Darussalam", bib$Country_Raw, ignore.case = TRUE)] <- "Brunei"
+#> 	Netherlands
+bib$Country[grep("The Netherlands", bib$Country_Raw, ignore.case = TRUE)] <- "Netherlands"
+#> 	Congo
+bib$Country[grep("Congo", bib$Country_Raw, ignore.case = TRUE)] <- "Republic of Congo"
+
+
+
+#> Process ready for analysis
+#> Change "Country" field to uppercase for ease of matching with natural earth countries
+bib$Country_Upper <- toupper(bib$Country)
+#> Delete "Country column"
+bib$Country <- NULL
+#> Rename "Country_Upper" to "Country"
+bib <- bib |> 
+  rename(Country = Country_Upper)
+#> Summary and count of unique countries in bib
+countries.count <- bib |> 
+  select(Country) |> 
+  group_by(Country) |> 
+  summarise(n = n()) |> 
+  rename(name = Country)
+#> In ne.countries, drop original "name" column and rename "nameUpper" to "name", for anti join
+countries.ne <- countries.ne |> 
+  select(nameUpper) |> 
+  rename(name = nameUpper)
+#> Anti-join shows records in bib$Country that do not join to natural earth countries
+anti.j.countries <- dplyr::anti_join(countries.count, countries.ne, by.x =  "name") |> 
+  arrange(desc(n))
+#> Remove NAs
+anti.j.countries <- anti.j.countries[!is.na(anti.j.countries$name),]
+#> Count the total number of records where bib countries are unmatched with ne countries
+unmatched <- sum(anti.j.countries$n)
+
+
+#> Summary and count of publications by unique countries in "bib"
+countries4map <- bib |> 
+  select(EID, Country, Year)
+#> Remove NAs
+countries4map  <- countries4map[!is.na(countries4map$Country),]
+#> Remove records in bib that are not matched to natural earth countries
+countries4map <- countries4map[!(countries4map$Country %in% anti.j.countries$name),]
+#> Abbreviate country names
+countries4map$Country[countries4map$Country == "UNITED STATES OF AMERICA"] <- "USA"
+countries4map$Country[countries4map$Country == "UNITED KINGDOM"] <- "UK"
+#> Count number of countries
+countries4map.sum <- countries4map |> 
+  group_by(Country, Year) |> 
+  summarise(count = n())
+
+#> Proportion of publications per country per year
+countries.prop <- countries4map |> 
+  select(Country, Year) |> 
+  filter(Year >=1980 & Year <=2021) |> 
+  group_by(Country, Year) |> 
+  summarise(n = n()) |> 
+  rename(name = Country) |> 
+  group_by(Year) |> 
+  mutate(percent = n/sum(n)*100) |> 
+  arrange(Year) |> 
+  ungroup()
+#> Round percentage proportions
+countries.prop$percent <- round(countries.prop$percent, digits = 1)
+
+
+#> PLOTTING THE RESULTS
+#> MAPS
+
+#> Spread (pivot wider) the countries.prop data table
+countries.prop.wide <- countries.prop  |> 
+  select(-n) |> 
+  pivot_wider(names_from = Year, values_from = percent)
+#> Join countries.prop with spatial data
+countries.geo <- merge(countries.ne, countries.prop.wide, by = "name", all.x= TRUE)
+#> Add prefix "Y" to year columns
+colnames(countries.geo)[2:43] <- paste("Y", colnames(countries.geo[,c(2:43)]), sep = "_")
+countries.geo[is.na(countries.geo)] <- 0
+#> Remove Antarctica
+countries.geo <- countries.geo |> 
+  filter(name != "ANTARCTICA") 
+
+#> Plot
+#> Initiate "Years" variable to control selection of years for mapping
+#> Replicate "countries.geo" table but remove 
+Years <- countries.geo
+st_geometry(Years) <- NULL
+Years <- names(Years[2:43])
+#> Create a variable to hold number of countries in each year where number of publications > 0
+#> Get number of countries where publications > 0 in each year
+countries.num <- countries.prop |> 
+  select(Year) |> 
+  group_by(Year) |> 
+  summarise(n = n())
+#> Create a list
+countries.num.plot <- as.list(countries.num$n)
+
+#> Generate plots
+for (i in 1: length(Years)) {
+  for (i in 1: length(countries.num.plot)) {
+    plt.geo <-ggplot(data = countries.geo) +
+      geom_sf(aes_string(fill = Years[i]), size = 0.1, show.legend = "polygon") +
+      scale_y_continuous(limits=c(-53,80)) + # adjust map extent
+      scale_fill_viridis_c(option = "plasma", trans = "sqrt", name = "% total pubs") + # colour scheme
+      # customise title
+      ggtitle(str_remove(Years[i], "Y_")) + 
+      theme(legend.text = element_text(size = 12, color = "white")) +
+      theme(legend.title = element_text(size = 12, color = "white")) + 
+      theme(plot.title = element_text(hjust = 0.5, size = 25, face = "bold", colour = "white")) +
+      ggplot2::annotate("text", x = 4, y = -50, label = paste0("n where pubs > 0 = ", countries.num.plot[[i]]), colour = "white", size = 5) +
+      theme(rect = element_blank(), axis.ticks = element_blank(), axis.text.x = element_blank(), panel.grid.major = element_line(colour = "transparent"))  # remove grid and lat/long labels
+    ggsave(here("Out", "2_Geographical_Analysis", "World_Maps", (paste0("Map_", Years[i], ".png"))), units = "in",  width = 13.333 , height = 7.5, bg = "black")
+    #> Show plot
+    plt.geo
+    #> Print on web page
+    print(plt.geo)
+  }
+  break
+  #> End plotting loop
+}
+
+
+#> CONVENTIONAL PLOTS
+#> BAR PLOT SHOWING TOP 10 COUNTRIES BY PUBLICATIONS (All years)
+#> Top 10 countries
+countries.top10 <- countries4map|> 
+  group_by(Country) |> 
+  summarise(Total = n()) |> 
+  slice_max(Total, n = 10) |> 
+  ungroup()
+#> Plot as horizontal bar chart
+plt.cntrs.top.10 <- countries.top10  |> 
+  ggplot(aes(x= reorder(Country, desc(-Total)),  y=Total)) +
+  # geom_line(size = 1.5, color = "blue") +
+  # geom_point(size= 4, colour = "blue") +
+  geom_bar(stat = 'identity', fill = "#2c66b8") +
+  labs(title = "Publications: Top 10 Countries (overall number of pubs - 1970-2021)", x = "Year", y = "Number of papers (count)") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 12, b = 0, l = 0))) +
+  geom_text(aes(label= paste0(round(Total / 1000, digits = 1), " K")), hjust = 1.5, colour = "white", size = 3) +
+  theme(legend.position="none") +
+  theme(panel.grid.minor.x = element_blank()) +
+  # explicitly set the horizontal lines (or they will disappear too)
+  # panel.grid.major = element_line( size=.1, color="gray")) +
+  coord_flip()
+plt.cntrs.top.10 
+# Export plot
+ggsave(here("Out", "2_Geographical_Analysis", "Plots", "Pubs_by_Top10Country.png"), width = 9, height = 5)
+#> Render on output page
+print(plt.cntrs.top.10) 
+
+
+#> LINE PLOT SHOWING PUBLICATIONS BY TOP 6 COUNTRIES OVER TIME
+countries.Top6.time <- countries.top10|> 
+  slice_max(Total, n = 6)
+Top6 <- as.character(unique(countries.Top6.time$Country))
+Top6.time <- countries.prop |> 
+  filter(name %in% Top6)
+plt.cntrs.top.6 <- Top6.time |>
+  ggplot(aes(x=Year, y=percent, color=name)) +
+  # geom_point() +
+  geom_line(size = 0.9) +
+  # geom_point(size = 1) +
+  labs(title = "Publications: Top 6 Countries (1980-2021)",  y = "Proportion of publications (%)") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(legend.title=element_blank()) +
+  # theme(axis.text.y = "Proportion of publications (%)") +
+  # theme(legend.position="none") +
+  # geom_line(show.legend = TRUE) +
+  # Switch off legend
+  # scale_colour_discrete(guide = 'none') +  
+  #> Use directlabels package to label end points of line
+  # geom_dl(aes(label = name), method = list(dl.trans(x = x + .3), "last.bumpup", cex = 0.8)) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 12, b = 0, l = 0))) 
+# scale_x_continuous(limits=c(1990, 2021)) +
+# scale_y_continuous(limits=c(0, 1200))
+plt.cntrs.top.6 
+# Export plot
+ggsave(here("Out", "2_Geographical_Analysis", "Plots", "Pubs_by_Top5Country.png"), width = 10, height = 8)
+print(plt.cntrs.top.6) 
+
+
+#> Plot showing number of countries publishing GIS papers per year
+#> Plot as bar chart
+plt.cntrs.yr <- countries.num |> 
+  ggplot(aes(x=Year, y=n)) +
+  # geom_line(size = 1.5, color = "blue") +
+  # geom_point(size= 4, colour = "blue") +
+  geom_bar(stat = 'identity', fill = "#FFA500") +
+  labs(title = paste0("No. of countries publishing GIS papers: ", min(countries.num$Year), " to ",  max(countries.num$Year)), x = "Year", y = "No. of countries") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 12, b = 0, l = 0))) +
+  # scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3), breaks = seq(0, max(countries.num$Year), by = 1000), expand = c(0.01, 0)) +
+  scale_x_continuous(breaks = seq(min(countries.num$Year), max(countries.num$Year), by = 5)) +
+  theme(legend.position="none") +
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        # explicitly set the horizontal lines (or they will disappear too)
+        panel.grid.major = element_line( size=.1, color="gray"))
+# Export plot
+ggsave(here("Out", "2_Geographical_Analysis", "Plots", "Pubs_No_Countries.png"), width = 7, height = 5)
+#> Render on output page
+print(plt.cntrs.yr) 
+
+
+#> Clear any existing objects from the project environment
+rm(list = ls())
+
+#> Import processed bibliographic data for topic modelling
+data <- read_csv(here("Out", "3_Topic_Modelling", "In", "bib4STM.csv"))
+#> Keep only required fields (i.e. )
+data <- data |> 
+  select(Abstract, Year, Source, EID) |> # Keeping source to identify irrelevant journals during analysis
+  # Remove records where 'Abstract' = "[No abstract available] OR is NA"
+  filter(Abstract != "[No abstract available]") |> 
+  filter(!str_detect(Abstract, "no abstract available")) |> 
+  # Remove records with NAs (in any field)
+  na.omit(data)
+
+#> Remove all text after the final full stop "." in each abstract. This rmeoves most of the author and copyright notes, though this is not perfect and does result in loss of some data - judged to be acceptable
+data$Abstract_cln <- sub(".[^.]+$", "", data$Abstract) # THIS DOESN'T WORK - E.G. 2-s2.0-0018921385  - REMOVES TEXT
+
+#> Count words in original abstract column and cleaned abstract column and assess difference to gauge data loss
+data <- data |> 
+  mutate(n_words_Abs = stringr::str_count(Abstract, ' ')) |> 
+  mutate(n_words_AbsCln = stringr::str_count(Abstract_cln, ' ')) |> 
+  mutate(n_wordsDiff = n_words_Abs - n_words_AbsCln)
+#> After investigating abstracts it was determined that abstracts with less than 100 words were regarded as less than optimal  for topic modelling and were removed
+#> First get a count of pubs per year - all records
+data.cntYr <- data |> 
+  group_by(Year) |>
+  summarise(CountYears = n())
+#> Create frame showing count per year of abstracts with less then 100 words
+abs.100 <- data |> 
+  filter(n_words_AbsCln < 100)|> 
+  group_by(Year) |> 
+  summarise(CountAbs100 = n())
+#> Join
+abs.100 <- merge(abs.100, data.cntYr, by = "Year")
+#> Calculate percentage of lost (i.e. abstract <100 words per year)
+abs.100$pcLoss <- round(abs.100$CountAbs100 / abs.100$CountYears * 100, digits = 1)
+
+
+#> Plot distribution of papers removed when abstract <100 words - raw count
+plt.abs.100 <- abs.100 |> 
+  ggplot(aes(x=Year, y=CountAbs100)) +
+  geom_bar(stat = 'identity', fill = "#E66101") +
+  labs(title = "Articles with abstracts <100 words - raw count", x = "Year", y = "Word count") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 12, b = 0, l = 0))) +
+  scale_x_continuous(breaks = seq(min(abs.100$Year), max(abs.100$Year), by = 5)) +
+  theme(legend.position="none") +
+  theme(panel.grid.minor.x = element_blank(),
+        # panel.grid.major.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        # explicitly set the horizontal lines (or they will disappear too)
+        panel.grid.major = element_line( size=.1, color="gray"))
+# Export plot
+ggsave(here("Out", "3_Topic_Modelling", "3.1_Ingest", "Plots", "Plot_Abs_100Count.png"), width = 7, height = 5)
+#> Render on output page
+print(plt.abs.100) 
+
+#> Plot distribution of papers removed when abstract <100 words - percentage of annual total per year
+plt.abs.100.pc <- abs.100 |> 
+  ggplot(aes(x=Year, y=pcLoss)) +
+  geom_bar(stat = 'identity', fill = "#E66101") +
+  labs(title = "Articles <100 words - percentage of annual total", x = "Year", y = "% publications") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 12, b = 0, l = 0))) +
+  scale_x_continuous(breaks = seq(min(abs.100$Year), max(abs.100$Year), by = 5)) +
+  theme(legend.position="none") +
+  theme(panel.grid.minor.x = element_blank(),
+        # panel.grid.major.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        # explicitly set the horizontal lines (or they will disappear too)
+        panel.grid.major = element_line( size=.1, color="gray"))
+# Export plot
+ggsave(here("Out", "3_Topic_Modelling", "3.1_Ingest", "Plots", "Plot_Abs_100pcLoss.png"), width = 7, height = 5)
+#> Render on output page
+print(plt.abs.100.pc ) 
+
+
+
+#> Remove records where abstracts <100 words from main data table
+data <- data |> 
+  filter(!n_words_AbsCln < 100) 
+
+
+#> Plot distribution of number of words in abstract
+abs.cnt <- data |> 
+  group_by(n_words_AbsCln) |> 
+  summarise(Count = n())
+#> Plot abstract word distribution as bar chart
+plt.abs.cnt <- abs.cnt |> 
+  ggplot(aes(x=n_words_AbsCln, y=Count)) +
+  geom_bar(stat = 'identity', fill = "#2c66b8") +
+  labs(title = "Abstracts: Word counts by frequency") +
+  theme_bw() +
+  scale_x_continuous(breaks = seq(0, 2000, 250)) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 12, b = 0, l = 0))) +
+  theme(legend.position="none") +
+  theme(panel.grid.minor.x = element_blank(),
+        # panel.grid.major.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        # explicitly set the horizontal lines (or they will disappear too)
+        panel.grid.major = element_line( size=.1, color="gray"))
+# Export plot
+ggsave(here("Out", "3_Topic_Modelling", "3.1_Ingest", "Plots", "Plot_Abs_Count.png"), width = 7, height = 5)
+#> Render on output page
+print(plt.abs.cnt) 
+
+
+#> Count number of publications by year and plot as bar chart
+pubs.yr <- data |> 
+  group_by(Year) |> 
+  summarise(n = n())
+#> Plot as bar chart
+plt.pubs.yr <- pubs.yr |> 
+  ggplot(aes(x=Year, y=n)) +
+  # geom_line(size = 1.5, color = "blue") +
+  # geom_point(size= 4, colour = "blue") +
+  geom_bar(stat = 'identity', fill = "#2c66b8") +
+  labs(title = paste0("Published GIS Research Papers: ", min(pubs.yr$Year), " to ",  max(pubs.yr$Year), " (after abstract processing)", " n = ", nrow(data)), x = "Year", y = "No. of articles") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 12, b = 0, l = 0))) +
+  scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3), breaks = seq(0, max(pubs.yr$n), by = 1000), expand = c(0.01, 0)) +
+  scale_x_continuous(breaks = seq(min(pubs.yr$Year), max(pubs.yr$Year), by = 5)) +
+  geom_vline(aes(xintercept=1995.5), colour = '#FF0000', size = 2) +
+  theme(legend.position="none") +
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        # explicitly set the horizontal lines (or they will disappear too)
+        panel.grid.major = element_line( size=.1, color="gray"))
+# Export plot
+ggsave(here("Out", "3_Topic_Modelling", "3.1_Ingest", "Plots", "Plot_Pubs_by_Year_ALL.png"), width = 7, height = 5)
+#> Render on output page
+print(plt.pubs.yr) 
+
+
+#> Based on outcome of above analysis, select the date range for topic modelling analysis. Years selected 1991 (451 articles) to 2021 (11,620 articles) - UPDATE STATS AND ADD TO WRITE-UP!
+data <- data |> 
+  filter(Year >= 1996) |> 
+  #> Select only required columns
+  select(Abstract_cln, Year, EID) |> 
+  #> Rename "Abstract_cln" to "Abstract"
+  rename(Abstract = Abstract_cln)
+
+
+#> Plot of final sample - no of papers per year
+
+#> Count number of publications by year and plot as bar chart
+pubs.final.yr <- data |> 
+  group_by(Year) |> 
+  summarise(n = n())
+#> Plot as bar chart
+plt.pubs.final.yr <- pubs.final.yr |> 
+  ggplot(aes(x=Year, y=n)) +
+  # geom_line(size = 1.5, color = "blue") +
+  # geom_point(size= 4, colour = "blue") +
+  geom_bar(stat = 'identity', fill = "#2c66b8") +
+  labs(title = paste0("Final sample - Published GIS Research Papers ", min(pubs.final.yr$Year), " to ",  max(pubs.final.yr$Year), " (after abstract processing)", " n = ", nrow(data)), x = "Year", y = "No. of articles") +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  theme(axis.title.x = element_text(margin = margin(t = 12, r = 0, b = 0, l = 0))) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 12, b = 0, l = 0))) +
+  scale_y_continuous(labels = scales::unit_format(unit = "k", scale = 1e-3), breaks = seq(0, max(pubs.final.yr$n), by = 1000), expand = c(0.01, 0)) +
+  scale_x_continuous(breaks = seq(min(pubs.final.yr$Year), max(pubs.final.yr$Year), by = 5)) +
+  # geom_vline(aes(xintercept=1995.5), colour = '#FF0000', size = 2) +
+  theme(legend.position="none") +
+  theme(panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        # explicitly set the horizontal lines (or they will disappear too)
+        panel.grid.major = element_line( size=.1, color="gray"))
+# Export plot
+ggsave(here("Out", "3_Topic_Modelling", "3.1_Ingest", "Plots", "Plot_Pubs_FinalSample_by_Year_ALL.png"), width = 7, height = 5)
+#> Render on output page
+print(plt.pubs.final.yr) 
+
+
+#>-------------------------------------------------------------------------------------------------------
+#> Pre-process data using the 'stm::textProcessor'- stemming (reducing words to their root form), dropping punctuation and stop word removal (e.g., the, is, at)
+processed <- stm::textProcessor(data$Abstract, metadata = data)
+
+#> Print a documents list object (e.g. "document 1")
+print(processed[["documents"]][["1"]])
+#>---------------------------------------------------------------------------------------------------------
+
+#> Remove everything from the environment apart from main data table "data" and "processed"
+rm(list = setdiff(ls(), c("bib", "processed")))
+
+
+
+#> Experiment with the effect of different word frequency thresholds prior to running  the 'prepDocuments' function
+#> minimum number of documents a word needs to appear in order for the word to be kept within the vocabulary
+png(filename=here("Out", "3_Topic_Modelling", "3.1_Ingest", "Plots", "Plot2_plotRemoved.png"), width = 9, height = 5, units = "in", res = 300)
+plt.rem <- plotRemoved(processed$documents, lower.thresh = seq(from = 1, to = 100, by = 1))
+dev.off()
+
+#> Run 'prepDocument' function to process data for topic modelling
+out <- prepDocuments(processed$documents, processed$vocab, processed$meta,  lower.thresh = 10, upper.thresh = Inf, subsample = NULL, verbose = TRUE)
+#> Main objects created for use with stm:
+#> 1. The new documents object for use with stm
+docs <- out$documents
+#> 2. The new vocab object for use with stm
+vocab <- out$vocab
+#> 3. The new meta data object for use with stm. Will be the same if no documents are removed.
+meta <-out$meta
+#> Other object generated by prepDocuments
+#> 4. A set of indices corresponding to the positions in the original vocab object of words which have been removed
+w.rem <- out$words.removed
+print(w.rem)
+#> 5. A set of indices corresponding to the positions in the original documents object of documents which no longer contained any words after dropping terms from the vocab
+d.rem <- out$docs.removed
+print(d.rem)
+#> 6. An integer corresponding to the number of unique tokens removed from the corpus
+t.rem <- out$tokens.removed
+print(t.rem)
+#> 7. A table giving the the number of documents that each word is found in of the original document set, prior to any removal. This can be passed through a histogram for visual inspection
+w.count <- out$wordcounts
+print(w.count)
+
+
+
+
+#> furrr parallel processing settings
+#> Set the number of physical cores available for parallel processing
+cores <- 15 # (one minus maximum)
+future::plan(multisession, workers = cores)
+set.seed(54321)
+#> Set number of topics
+k.topics <- seq(10, 100, 10)
+#> Function for running/estimating STMs
+estimate_stm <- function(x){
+  stm::stm(documents = out$documents, vocab = out$vocab, K = x, prevalence =~ Year, max.em.its = 75, data = out$meta, init.type = "Spectral") 
+}
+#> Start timer
+tic()
+#> Call 'estimate-stm' function
+lst.models <- furrr::future_map(k.topics, estimate_stm, .options = furrr_options(seed = T))
+#> End timer
+toc()
+#> Assign names to stms in "lst.models"
+#> Generate a character string of stm model names, indicating number of topics in each
+names.stms <- paste0('stm.', seq(10, 100, by=10))
+#> Rename the stm objects in the "lst.models" produced by above function
+lst.models <- purrr::set_names(lst.models, names.stms)
+#> Export from R to project folder so STMs can be reloaded without exporting
+saveRDS(lst.models, file = here("Out", "3_Topic_Modelling", "3.3_Estimate", "STM_Runs", paste0("STMs_", Sys.Date(), "_.Data")))
+#> Try models with spline(Year) as well? ======================================================================
+
+
+
+# #>------------------------------------------------------------------------------------------------------------
+# #> Get latest version of exported stms - i.e. latest run of "lst.models"
+# df.files <- file.info(list.files(here("Out", "3_Topic_Modelling", "3.3_Estimate", "STM_Runs"), full.names = T))
+# strLoadRecent <- rownames(df.files)[which.max(df.files$mtime)]
+# lst.models <- readRDS(file = strLoadRecent)
+# #>------------------------------------------------------------------------------------------------------------
+
+#> SAVE CURRENT WORKSPACE SESSION TO AVOID LONG RUNS TO RE-GENERATE STMS ON START-UP
+save.image(here("Workspace_Images", paste0("Topics_stmRuns_", Sys.Date(), "_.RData")))
+
+
+
+
+#> Preliminary K topics selection strategy
+#> As per STM paper/vignette, run standard stm estimation with K set to zero
+# set.seed(421)
+# stm.0 <- stm::stm(documents = out$documents, vocab = out$vocab, K = 0, prevalence =~ Year, max.em.its =75, data = out$meta, init.type = "Spectral") 
+# #> Export from R to project folder so STMs can be reloaded without exporting
+# saveRDS(stm.0, file = here("Out", "3_Topic_Modelling", "3.4_Evaluate", "stm0", paste0("STM_0_", Sys.Date(), "_.Data")))
+
+#>---------------------------------------------------------------------------------------------------------
+#> Load previously generated 'stm.0' run 
+#> Get latest version of 'stm.0' - i.e. latest run
+df.files <- file.info(list.files(here("Out", "3_Topic_Modelling", "3.4_Evaluate", "stm0"), full.names = T))
+strLoadRecent <- rownames(df.files)[which.max(df.files$mtime)]
+stm.0 <- readRDS(file = strLoadRecent)
+#>---------------------------------------------------------------------------------------------------------
+
+
+#> Estimate choice of number of topics using searchK function
+# set.seed(54321)
+# #> Values for K
+# K <- seq(10, 100, by=10)
+# #> Start timer
+# tic()
+# #> Run stm::searchK function
+# k.result <- stm::searchK(out$documents, out$vocab, K, prevalence =~ Year, data = out$meta)
+# #> End timer
+# toc()
+# saveRDS(k.result, file = here("Out", "3_Topic_Modelling", "3.4_Evaluate", "searchK", paste0("KResult_", Sys.Date(), "_.Data")))
+# #> Plot the diganostic values of searchK function (e.g. semantic coherence
+# png(here("Out", "3_Topic_Modelling", "3.4_Evaluate", "searchK_Plots", paste0("searchK_", Sys.Date(), "_.png")), width = 800, height = 600)
+# kplot <- plot.searchK(k.result)
+# dev.off()
+
+#>-------------------------------------------------------------------------------------------------------------
+#> Get latest version of k.result - i.e. latest run
+df.files <- file.info(list.files(here("Out", "3_Topic_Modelling", "3.4_Evaluate", "searchK"), full.names = T))
+strLoadRecent <- rownames(df.files)[which.max(df.files$mtime)]
+k.result <- readRDS(file = strLoadRecent)
+#> Evaluating STMS the tidy way - see: https://juliasilge.com/blog/evaluating-stm/
+#>-------------------------------------------------------------------------------------------------------------
+
+
+
+
+#> SAVE CURRENT WORKSPACE SESSION TO AVOID LONG RUNS TO RE-GENERATE STMS ON START-UP
+save.image(here("Workspace_Images", paste0("Topics_stmRuns_", Sys.Date(), "_.RData")))
+
+
+#> ASSESSING TOPIC QUALITY
+#> Function to generate and export 'topicQuality' plots for each stm
+fun_quality <- function(x, y){
+  #> Run stm::topicQuality
+  png(here("Out", "3_Topic_Modelling", "3.4_Evaluate", "topicQuality", paste0("topicQuality_", y, ".png")), width = 800, height = 600)
+  plt.topic <- stm::topicQuality(model=x, documents = docs)
+  dev.off()
+}
+#> Call function - use map2 to pass stm names as well as stms themselves
+purrr::map2(lst.models, names(lst.models), fun_quality)
+
+
+#> Semantic coherence vs exclusivity to help find 'K'
+
+#> For each STM model plot semantic coherence against exclusivity - see: https://francescocaberlin.blog/2019/06/26/messing-around-with-stm-part-iiia-model-selection/ 
+#> First generate a data frame for each stm with exclusivity and semantic coherence variables for each K topic
+#> Empty list to hold data frames produced by loop below (convert to purrr in future)
+lst.semEx <- list()
+#> Initiate loop
+for(i in 1:length(lst.models)){
+  #> Convert stm into tidy format
+  tidy.stm <- tidytext::tidy(lst.models[[i]])
+  #> Count the number of topics in each model
+  topic.cnt <- length(unique(tidy.stm[["topic"]]))
+  #> Create a data frame for each stm with columns for exclusivity and semantic coherence values for each topic
+  df.semEx <- as.data.frame(cbind(c(1:topic.cnt), stm::exclusivity(lst.models[[i]]), semanticCoherence(model=lst.models[[i]], docs), paste0("Mod_", topic.cnt)))
+  #> Set column names
+  colnames(df.semEx) <- c("K", "Exclusivity", "SemanticCoherence", "Model")
+  df.semEx$topicNum <- topic.cnt
+  #> Add dataframe to list 'dfs.semEx
+  lst.semEx[[i]] <- df.semEx 
+  #> End loop
+}
+#> Bind the list of semEx dfs into single df
+df.semEx.all <- do.call(rbind.data.frame, lst.semEx)
+#> Change format of 'Exclusivity' and 'SemanticCoherence' columns to numeric
+df.semEx.all$Exclusivity <-as.numeric(as.character(df.semEx.all$Exclusivity))
+df.semEx.all$SemanticCoherence <-as.numeric(as.character(df.semEx.all$SemanticCoherence))
+
+
+#> Plotting and interpreting the data
+#> Run the semantic coherence vs. exclusivity plot for all stm models
+plot.ExSem.all <-ggplot(df.semEx.all, aes(SemanticCoherence, Exclusivity, color = Model)) +
+  geom_point(size = 1, alpha = 0.7) +
+  labs(x = "Semantic coherence",
+       y = "Exclusivity",
+       title = "Comparing exclusivity and semantic coherence") 
+plot.ExSem.all
+#> Export plot
+ggsave(here("Out", "3_Topic_Modelling", "3.4_Evaluate", "semEx_Plots", "Specific_combinations", "plot_semEx_All.png"), width = 9, height = 7, dpi = 300)
+
+
+#> Create multiple plots with models plotted against each other in pairs
+
+#> Variables for topic numbers to drive loop
+#> Topic numbers - ascending
+k.asc <- seq(20, 100, by=10)
+#> Topic numbers - descending
+k.rev <- rev(k.asc)
+# Start nested loop
+for(i in 1:length(k.asc)){
+  for(j in 1:length(k.rev)){
+    #> Prep data frame
+    df.semExPlot <- df.semEx.all |> 
+      filter(topicNum == k.asc[i] | topicNum == k.rev[j])
+    #> Plot data
+    sem.ex.plot <- ggplot(df.semExPlot, aes(SemanticCoherence, Exclusivity, color = Model)) +
+      geom_point(size = 1, alpha = 0.7) +
+      geom_point(aes(shape = Model)) +
+      #> Se axis limits so all are same (max and min values of semEx)
+      xlim(min(df.semEx.all$SemanticCoherence), max(df.semEx.all$SemanticCoherence)) +
+      ylim(min(df.semEx.all$Exclusivity), max(df.semEx.all$Exclusivity)) +
+      # scale_x_continuous(breaks = seq(min(df.semEx.all$SemanticCoherence), max(df.semEx.all$SemanticCoherence), by = 50)) +
+      labs(x = "Semantic coherence",
+           y = "Exclusivity",
+           title = "Comparing exclusivity and semantic coherence") 
+    sem.ex.plot 
+    #> Export plot
+    ggsave(here("Out", "3_Topic_Modelling", "3.4_Evaluate", "semEx_Plots", "Automated_pair_combinations", paste0("plot_semEx_", k.asc[i], "_", k.rev[j], "_", ".png")), width = 9, height = 7, dpi = 300)
+  }
+  #> End loop
+}
+
+#> Investigate combinations of models to narrow-down selection
+
+#> 20, 40, 60, and 80 topics
+#> Prep data frame
+df.ExSem.20_40_60_80 <- df.semEx.all |> 
+  filter(topicNum == 20 | topicNum == 40 | topicNum == 60 | topicNum == 80)
+plot.ExSem.20_40_60_80 <-ggplot(df.ExSem.20_40_60_80, aes(SemanticCoherence, Exclusivity, color = Model)) +
+  geom_point(aes(shape = Model)) +
+  geom_point(size = 1, alpha = 0.7) +
+  xlim(min(df.semEx.all$SemanticCoherence), max(df.semEx.all$SemanticCoherence)) +
+  ylim(min(df.semEx.all$Exclusivity), max(df.semEx.all$Exclusivity)) +
+  labs(x = "Semantic coherence",
+       y = "Exclusivity",
+       title = "Comparing exclusivity and semantic coherence") 
+plot.ExSem.20_40_60_80
+#> Export plot
+ggsave(here("Out", "3_Topic_Modelling", "3.4_Evaluate", "semEx_Plots", "Specific_combinations","plot_semEx_20_40_60_80.png"), width = 9, height = 7, dpi = 300)
+
+
+#> 30,40,50 topics
+#> Prep data frame
+df.ExSem.30_40_50<- df.semEx.all |> 
+  filter(topicNum == 30 | topicNum == 40 | topicNum == 50)
+plot.ExSem.30_40_50 <-ggplot(df.ExSem.30_40_50, aes(SemanticCoherence, Exclusivity, color = Model)) +
+  geom_point(aes(shape = Model)) +
+  geom_point(size = 1, alpha = 0.7) +
+  xlim(min(df.semEx.all$SemanticCoherence), max(df.semEx.all$SemanticCoherence)) +
+  ylim(min(df.semEx.all$Exclusivity), max(df.semEx.all$Exclusivity)) +
+  labs(x = "Semantic coherence",
+       y = "Exclusivity",
+       title = "Comparing exclusivity and semantic coherence") 
+plot.ExSem.30_40_50
+#> Export plot
+ggsave(here("Out", "3_Topic_Modelling", "3.4_Evaluate", "semEx_Plots", "Specific_combinations","plot_semEx_30_40_50.png"), width = 9, height = 7, dpi = 300)
+
+
+
+#> 1. WORDS PLOTTED BY TOPIC - FACET PLOTS
+
+#> Function to convert stms to "tidy" versions, then plot the topics and top words in each topics, and export the plots. See: https://juliasilge.com/blog/sherlock-holmes-stm/
+fun_topics_plot1 <- function(stm){
+  #> Convert stm to tidy
+  stm.tidy <- tidytext::tidy(stm)
+  
+  #> Group by topic, take top 1o words (by beta value), create a factor for labelling in ggplot
+  stm.tidy  <- stm.tidy |> 
+    group_by(topic) |> 
+    top_n(10, beta) |> 
+    ungroup() |> 
+    mutate(Topic.label = factor(topic, levels = unique(topic[order(topic)]))) |> 
+    mutate(topic = paste0("Topic ", topic),
+           term = reorder_within(term, beta, topic)) 
+  #> Count number of topics in model
+  topic.cnt <- length(unique(stm.tidy[["topic"]]))
+  #> Custom label function for facet labels in plot. Need this because facets when plotted are ordered by the numerical "Topic.label" factor - labeller function then adds "Topic " to facet label header string
+  cust_labeller <- function(x) paste0("Topic ", x)
+  #> Create plot
+  plt.topics <- ggplot(stm.tidy, aes(term, beta, fill = factor(topic))) +
+    geom_col(alpha = 0.8, show.legend = FALSE) +
+    #> Use 'facet_wrap_paginate' to split output into multiple pages
+    facet_wrap_paginate(~Topic.label, scales = "free_y", ncol = 5, nrow = 4, labeller = as_labeller(cust_labeller)) +
+    coord_flip() +
+    scale_x_reordered() +
+    labs(x = NULL, y = expression(beta),
+         title = paste0("STM ", topic.cnt, ": ", "Highest word probabilities for each topic"), 
+         subtitle = "Different words are associated with different topics")
+  plt.topics
+  #> Solution from here: https://stackoverflow.com/questions/64795204/how-to-do-ggplot2-facet-wrap-on-different-pages
+  for(i in 1:ggforce::n_pages(plt.topics)){
+    plt.save <-  plt.topics + 
+      facet_wrap_paginate(~Topic.label, scales = "free_y", ncol = 5, nrow = 4, labeller = as_labeller(cust_labeller), page = i) 
+    ggsave(plot = plt.save, filename = here("Out", "3_Topic_Modelling", "3.5_Understand", "Topic_facet_plots", paste0("stm_", topic.cnt, "/page_", i, "_", "stm_", topic.cnt, ".png")), width = 12, height = 8)
+    #> End loop
+  }
+  #> End 'fun_topics_plot1'
+}
+#> Call function fun_topics_plot1 
+purrr::map(lst.models, fun_topics_plot1)
+
+
+
+#> 2. labelTopics - display words associated with topics
+#> Function to iterate through stms and print top words associated with topics
+fun_labelTopics <- function(x){
+  #> Convert stm to tidy format
+  stm.tidy <- tidytext::tidy(x)
+  topic.cnt <- length(unique(stm.tidy[["topic"]]))
+  labs.stm <- stm::labelTopics(x, 1:topic.cnt)
+  sink(file = here("Out", "3_Topic_Modelling", "3.5_Understand", "labelTopics", paste0( "labeltopics_STM_", topic.cnt, ".txt")))
+  print(labs.stm) #> Export to external file
+  sink(file = NULL)
+}
+#> Call function
+purrr::map(lst.models, fun_labelTopics)
+
+
+
+#> 3. LDA Viz - interactive stm/topic plots
+#> YOU CAN SET LAMDA IN URL SO BEAR THIS IN MIND WHEN SHARING WITH GROUP
+
+#> Clear previously exported ldaViz output files from output folders
+ldaViz.fold <- here("Out", "3_Topic_Modelling", "3.5_Understand", "ldaViz")
+# get all files in the directories, recursively
+f <- list.files(ldaViz.fold, include.dirs = F, full.names = T, recursive = T)
+# remove the files
+file.remove(f)
+do.call(file.remove, list(list.files(here("Out", "3_Topic_Modelling", "3.5_Understand", "ldaViz"), full.names = TRUE)))
+#> Now remove the empty folders
+empty.folds <- list.dirs(here("Out", "3_Topic_Modelling", "3.5_Understand", "ldaViz"), recursive = FALSE)
+for(folder in empty.folds){
+  if(length(dir(folder)) == 0){
+    unlink(folder, recursive = TRUE)
+  }
+}
+#> Function to create LDA plots for all models
+fun_ldaViz <- function(x, y){
+  stm::toLDAvis(
+    x,
+    docs,
+    R = 30,
+    plot.opts = list(xlab = "PC1", ylab = "PC2"),
+    lambda.step = 0.01,
+    out.dir = here("Out", "3_Topic_Modelling", "3.5_Understand", "ldaViz", paste0("LDA_Viz_", y)),
+    open.browser = interactive(),
+    as.gist = FALSE,
+    reorder.topics = TRUE
+  )
+}
+#> Call function
+purrr::map2(lst.models, names(lst.models), fun_ldaViz)
+
+
+#> 4. findThoughts - examine documents that are highly associated with specific topics
+
+#> Create funtion to export the text from 10 abstracts for each topic - per stm
+fun_findThoughts <- function(x, y) {
+  #> Get number of topics for target stm
+  stm.tidy <- tidytext::tidy(x) # NEED TO CREATE LIST OF TIDY STMS ONCE AND RE-USE!!!!
+  topic.cnt <- length(unique(stm.tidy[["topic"]]))
+  topic.seq <- seq(1, topic.cnt, 1)
+  #> Loop through topics in each stm
+  for(i in 1:length(topic.seq)){
+    #> Run findThoughts function over each topic
+    thoughts <- stm::findThoughts(
+      x, # the stm model
+      texts = data$Abstract, # not the output from 'prepDocuments' but the actual raw input text
+      topics = topic.seq[i], # topic number
+      n = 20, # number documents to be displayed per topic
+      thresh = NULL,
+      where = NULL,
+      meta = NULL
+    )
+    #> Export 'thoughts' as text file
+    sink(file = here("Out", "3_Topic_Modelling", "3.5_Understand", "findThoughts", y,  paste0( "findThoughts_STM_", y, "_Topic_", topic.seq[i], ".txt")))
+    print(thoughts) 
+    sink(file = NULL)
+  }
+} # End function
+#> Call findThoughts function
+purrr::map2(lst.models, names(lst.models), fun_findThoughts)
+
+lst.models[[1]]
+
+#> 5. Word clouds - create word clouds for each topic in each stm
+
+fun_wordCloud <- function(x, y){
+  #> Get number of topics for target stm
+  stm.tidy <- tidytext::tidy(x) # NEED TO CREATE LIST OF TIDY STMS ONCE AND RE-USE !!!!
+  topic.cnt <- length(unique(stm.tidy[["topic"]]))
+  topic.seq <- seq(1, topic.cnt, 1)
+  #> Loop through topics in each stm
+  for(i in 1:length(topic.seq)){
+    #> Export word clouds as images
+    png(filename=here("Out", "3_Topic_Modelling", "3.5_Understand", "wordCloud", y, paste0("wordCloud_", y, "_Topic_", topic.seq[i], ".png")), width = 6, height = 6, units = "in", res = 300)
+    #> Run wordCloud function over each topic
+    cloud <- stm::cloud(x, topic = topic.seq[i])
+    dev.off()
+  } # End loop
+} # End function
+#> Call wordCloud function
+purrr::map2(lst.models, names(lst.models), fun_wordCloud)
+
+
+> 1. PLOT TOPIC PROPORTIONS FOR EACH STM (ALL YEARS)
+#> Tips on plotting here: https://milesdwilliams15.github.io/Better-Graphics-for-the-stm-Package-in-R/
+#> 
+#> # #> When topic names decided put topic list for each topic here
+# topicNames<-c("Hello","Topic 2","Topic 3","Topic 4","Topic 5","Topic 6",
+#           "Topic 7","Topic 8","Topic 9","Topic 10","Topic 11","Topic 12",
+#           "Topic 13","Topic 14","Topic 15","Topic 16","Topic 17",
+#           "Topic 18","Topic 19","Topic 20")
+
+fun_topicProp <- function(x, y){
+  stm.tidy <- tidytext::tidy(x) # NEED TO CREATE LIST OF TIDY STMS ONCE AND RE-USE !!!!
+  #> Get topic number count to dynamically drive height of exported plot
+  topic.cnt <- length(unique(stm.tidy[["topic"]]))
+  #> Set height
+  plt.height <- topic.cnt/3.5
+  #> Customise aesthetics of plot
+  par(bty="n",col="grey40",lwd=5)
+  # plt.summary <- plot(lst.models$stm.20, type = "summary", custom.labels="", topic.names=topicNames) # use for final runs with custom topic names
+  pltTopcProp <- png(filename=here("Out", "3_Topic_Modelling", "3.5_Understand_Prevalence", "topicProportions", paste0("topicProp_", y, ".png")), width = 9, height = plt.height, units = "in", res = 300) 
+  plt.summary <- plot(x, type = "summary")
+  dev.off()
+}
+#> Call topicProp function
+purrr::map2(lst.models, names(lst.models), fun_topicProp)
+
+
+
+#> 2. PLOT TOPIC PREVALANCE FOR EACH STM AS A FUNCTION OF TIME
+
+#> First compute estimateEffects for each STM
+#> Create empty list to hold esimateEffects outputs for each stm
+
+lst.ee <-list()
+#> Start loop
+for(i in 1:length(lst.models)){
+  #> Get topic count for each stm
+  stm.tidy <- tidytext::tidy(lst.models[[i]]) 
+  topic.cnt <- length(unique(stm.tidy[["topic"]]))
+  #> Run estimateEffect
+  ee <- stm::estimateEffect(1:topic.cnt ~ Year, lst.models[[i]], metadata = out$meta, uncertainty = "Global")
+  #> Save estimateEffects for each stm to a list for further processing and plotting
+  lst.ee[[i]] <- ee
+}
+#> Generate a character string of stm model names, indicating number of topics in each
+names.ee <- paste0('ee.stm.', seq(20, 100, by=10))
+#> Rename the stm objects in the "lst.models" produced by above function
+lst.ee <- purrr::set_names(lst.ee, names.ee)
+
+
+
+######## SPLINE ALSO ######################################
+
+
+#> Function to plot topic prevalence over time for each stm
+#> Create function
+fun_topicPrev <- function(a, b, c){
+  #> Convert outs puts of esimateEffect to tidy format
+  effect <- tidystm::extract.estimateEffect(a, "Year", model = b, method = "continuous")
+  #> Get number of topics in target stm
+  topic.cnt <- length(unique(effect[["topic"]]))
+  #> Topic sequence counter
+  topic.seq <- seq(1, topic.cnt, 1)
+  #> Loop through each topic in each stm
+  for(i in 1:length(topic.seq)){
+    effect.df <- effect |> 
+      select(topic, covariate.value, estimate, ci.lower, ci.upper) |> 
+      rename(Year = covariate.value)|> 
+      filter(topic== paste0(topic.seq[i]))
+    #> plot
+    ggplot(effect.df, aes(x = Year, y = estimate, ymin = ci.lower, ymax = ci.upper)) +
+      ggtitle(paste0("Topic ", topic.seq[i])) +
+      geom_line()+
+      geom_ribbon(alpha = .2)
+    #> Export plot
+    ggsave(here("Out", "3_Topic_Modelling", "3.5_Understand_Prevalence", "topicPrevalenceTime", c, paste0("plot_Prev_", c, "_", "Topic_", topic.seq[i], ".png")), width = 9, height = 7, dpi = 300)
+    #> End loop within function
+  }
+  #> End function
+}
+#> Create list of input arguments for passing into function
+argsPrev <- list(lst.ee, lst.models, names(lst.models))
+#> Call fun-topicPrev function
+purrr::pmap(argsPrev, fun_topicPrev)
+
+
+
+
