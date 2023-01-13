@@ -17,6 +17,7 @@ TITLE-ABS-KEY ({geographic* data}) OR
 SRCTITLE(International Journal of Geographical Information Science) OR 
 SRCTITLE(Transactions in GIS) OR 
 SRCTITLE(Journal of Spatial Information Science) OR 
+SRCTITLE(Cartography and Geographic Information Science) OR 
 SRCTITLE(GeoInformatica) AND
 ( LIMIT-TO ( SRCTYPE,"j" ) ) AND 
 ( LIMIT-TO ( PUBSTAGE,"final" ) ) AND 
