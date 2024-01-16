@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta http-equiv="X-UA-Compatible" content="IE=edge">
+        <meta name="viewport" content="initial-scale=1,user-scalable=no,maximum-scale=1,width=device-width">
+        <meta name="mobile-web-app-capable" content="yes">
+        <meta name="apple-mobile-web-app-capable" content="yes">
+        <link rel="stylesheet" href="css/leaflet.css">
+        <link rel="stylesheet" href="css/qgis2web.css"><link rel="stylesheet" href="css/fontawesome-all.min.css">
+        <style>
+        #map {
+            width: 1256px;
+            height: 846px;
+        }
+        </style>
+        <title></title>
+    </head>
+    <body>
+        <div id="map">
+        </div>
+        <script src="js/qgis2web_expressions.js"></script>
+        <script src="js/leaflet.js"></script>
+        <script src="js/leaflet.rotatedMarker.js"></script>
+        <script src="js/leaflet.pattern.js"></script>
+        <script src="js/leaflet-hash.js"></script>
+        <script src="js/Autolinker.min.js"></script>
+        <script src="js/rbush.min.js"></script>
+        <script src="js/labelgun.min.js"></script>
+        <script src="js/labels.js"></script>
+        <script src="data/swabi_voronoi_merge_2.js"></script>
+        <script>
+        var map = L.map('map', {
+            zoomControl:true, maxZoom:28, minZoom:1
+        }).fitBounds([[51.466116173097895,-3.2383491342883324],[51.500673871795684,-3.1571816873466116]]);
+        var hash = new L.Hash(map);
+        map.attributionControl.setPrefix('<a href="https://github.com/tomchadwin/qgis2web" target="_blank">qgis2web</a> &middot; <a href="https://leafletjs.com" title="A JS library for interactive maps">Leaflet</a> &middot; <a href="https://qgis.org">QGIS</a>');
+        var autolinker = new Autolinker({truncate: {length: 30, location: 'smart'}});
+        var bounds_group = new L.featureGroup([]);
+        function setBounds() {
+        }
+        map.createPane('pane_GoogleSatellite_0');
+        map.getPane('pane_GoogleSatellite_0').style.zIndex = 400;
+        var layer_GoogleSatellite_0 = L.tileLayer('https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}', {
+            pane: 'pane_GoogleSatellite_0',
+            opacity: 1.0,
+            attribution: '<a href="https://www.google.at/permissions/geoguidelines/attr-guide.html">Map data ©2015 Google</a>',
+            minZoom: 1,
+            maxZoom: 28,
+            minNativeZoom: 0,
+            maxNativeZoom: 20
+        });
+        layer_GoogleSatellite_0;
+        map.addLayer(layer_GoogleSatellite_0);
+        map.createPane('pane_DarkMatter_1');
+        map.getPane('pane_DarkMatter_1').style.zIndex = 401;
+        var layer_DarkMatter_1 = L.tileLayer('https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png', {
+            pane: 'pane_DarkMatter_1',
+            opacity: 1.0,
+            attribution: '<a href="https://cartodb.com/basemaps/">Map tiles by CartoDB, under CC BY 3.0. Data by OpenStreetMap, under ODbL.</a>',
+            minZoom: 1,
+            maxZoom: 28,
+            minNativeZoom: 0,
+            maxNativeZoom: 20
+        });
+        layer_DarkMatter_1;
+        map.addLayer(layer_DarkMatter_1);
+        function pop_swabi_voronoi_merge_2(feature, layer) {
+            var popupContent = '<table>\
+                    <tr>\
+                        <th scope="row">wd_1923_label</th>\
+                        <td>' + (feature.properties['wd_1923_label'] !== null ? autolinker.link(feature.properties['wd_1923_label'].toLocaleString()) : '') + '</td>\
+                    </tr>\
+                </table>';
+            layer.bindPopup(popupContent, {maxHeight: 400});
+        }
+
+        function style_swabi_voronoi_merge_2_0(feature) {
+            switch(String(feature.properties['wd_1923_label'])) {
+                case '- Infinity to -100.1':
+                    return {
+                pane: 'pane_swabi_voronoi_merge_2',
+                opacity: 1,
+                color: 'rgba(101,60,153,0.0)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(101,60,153,0.704)',
+                interactive: true,
+            }
+                    break;
+                case '-100.1 to -50.1':
+                    return {
+                pane: 'pane_swabi_voronoi_merge_2',
+                opacity: 1,
+                color: 'rgba(101,60,153,0.0)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(101,2,1,0.704)',
+                interactive: true,
+            }
+                    break;
+                case '-50 to -25':
+                    return {
+                pane: 'pane_swabi_voronoi_merge_2',
+                opacity: 1,
+                color: 'rgba(101,60,153,0.0)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(255,120,0,0.704)',
+                interactive: true,
+            }
+                    break;
+                case '-25 to -0.1':
+                    return {
+                pane: 'pane_swabi_voronoi_merge_2',
+                opacity: 1,
+                color: 'rgba(101,60,153,0.0)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(255,232,107,0.704)',
+                interactive: true,
+            }
+                    break;
+                case '-0.1 to 0.1':
+                    return {
+                pane: 'pane_swabi_voronoi_merge_2',
+                opacity: 1,
+                color: 'rgba(101,60,153,0.0)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(171,171,171,0.704)',
+                interactive: true,
+            }
+                    break;
+                case '0.1 to 25':
+                    return {
+                pane: 'pane_swabi_voronoi_merge_2',
+                opacity: 1,
+                color: 'rgba(101,60,153,0.0)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(163,204,217,0.704)',
+                interactive: true,
+            }
+                    break;
+                case '25 to 50':
+                    return {
+                pane: 'pane_swabi_voronoi_merge_2',
+                opacity: 1,
+                color: 'rgba(101,60,153,0.0)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(77,167,186,0.704)',
+                interactive: true,
+            }
+                    break;
+                case '50 to 100':
+                    return {
+                pane: 'pane_swabi_voronoi_merge_2',
+                opacity: 1,
+                color: 'rgba(101,60,153,0.0)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(19,128,157,0.704)',
+                interactive: true,
+            }
+                    break;
+                case '100 to Inf':
+                    return {
+                pane: 'pane_swabi_voronoi_merge_2',
+                opacity: 1,
+                color: 'rgba(101,60,153,0.0)',
+                dashArray: '',
+                lineCap: 'butt',
+                lineJoin: 'miter',
+                weight: 1.0, 
+                fill: true,
+                fillOpacity: 1,
+                fillColor: 'rgba(0,80,117,0.704)',
+                interactive: true,
+            }
+                    break;
+            }
+        }
+        map.createPane('pane_swabi_voronoi_merge_2');
+        map.getPane('pane_swabi_voronoi_merge_2').style.zIndex = 402;
+        map.getPane('pane_swabi_voronoi_merge_2').style['mix-blend-mode'] = 'normal';
+        var layer_swabi_voronoi_merge_2 = new L.geoJson(json_swabi_voronoi_merge_2, {
+            attribution: '',
+            interactive: true,
+            dataVar: 'json_swabi_voronoi_merge_2',
+            layerName: 'layer_swabi_voronoi_merge_2',
+            pane: 'pane_swabi_voronoi_merge_2',
+            onEachFeature: pop_swabi_voronoi_merge_2,
+            style: style_swabi_voronoi_merge_2_0,
+        });
+        bounds_group.addLayer(layer_swabi_voronoi_merge_2);
+        map.addLayer(layer_swabi_voronoi_merge_2);
+        var baseMaps = {};
+        L.control.layers(baseMaps,{'swabi_voronoi_merge<br /><table><tr><td style="text-align: center;"><img src="legend/swabi_voronoi_merge_2_Infinityto10010.png" /></td><td>- Infinity to -100.1</td></tr><tr><td style="text-align: center;"><img src="legend/swabi_voronoi_merge_2_1001to5011.png" /></td><td>-100.1 to -50.1</td></tr><tr><td style="text-align: center;"><img src="legend/swabi_voronoi_merge_2_50to252.png" /></td><td>-50 to -25</td></tr><tr><td style="text-align: center;"><img src="legend/swabi_voronoi_merge_2_25to013.png" /></td><td>-25 to -0.1</td></tr><tr><td style="text-align: center;"><img src="legend/swabi_voronoi_merge_2_01to014.png" /></td><td>-0.1 to 0.1</td></tr><tr><td style="text-align: center;"><img src="legend/swabi_voronoi_merge_2_01to255.png" /></td><td>0.1 to 25</td></tr><tr><td style="text-align: center;"><img src="legend/swabi_voronoi_merge_2_25to506.png" /></td><td>25 to 50</td></tr><tr><td style="text-align: center;"><img src="legend/swabi_voronoi_merge_2_50to1007.png" /></td><td>50 to 100</td></tr><tr><td style="text-align: center;"><img src="legend/swabi_voronoi_merge_2_100toInf8.png" /></td><td>100 to Inf</td></tr></table>': layer_swabi_voronoi_merge_2,"Dark Matter": layer_DarkMatter_1,"Google Satellite": layer_GoogleSatellite_0,},{collapsed:false}).addTo(map);
+        setBounds();
+        </script>
+    </body>
+</html>
